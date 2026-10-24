@@ -85,14 +85,40 @@ spec = importlib.util.spec_from_loader("somna_mod", loader); mod = importlib.uti
 tmp = Path(H) / "unit"; (tmp / "memory/clients/x/repos").mkdir(parents=True, exist_ok=True)
 f = tmp / "memory/clients/x/repos/r.md"
 f.write_text("# r\n\n## Current state\n- old   line one (as of 2026-01-01)\n\n## Gotchas\n- keep me\n")
-check("U1 add goes under its section", mod.apply_finding(tmp, {"file": "memory/clients/x/repos/r.md", "action": "add", "section": "## Current state",
+check("U1 add goes under its section", "applied" == mod.apply_finding(tmp, {"file": "memory/clients/x/repos/r.md", "action": "add", "section": "## Current state",
       "new_text": "- new line", "target_text": ""}, "2026-10-20") and f.read_text().index("- new line (as of 2026-10-20)") < f.read_text().index("## Gotchas"), f.read_text())
-check("U2 replace matches despite different spacing", mod.apply_finding(tmp, {"file": "memory/clients/x/repos/r.md", "action": "replace", "section": "",
+check("U2 replace matches despite different spacing", "applied" == mod.apply_finding(tmp, {"file": "memory/clients/x/repos/r.md", "action": "replace", "section": "",
       "target_text": "- old line one (as of 2026-01-01)", "new_text": "- line one, updated"}, "2026-10-21") and "line one, updated (as of 2026-10-21)" in f.read_text() and "old" not in f.read_text(), f.read_text())
-check("U3 add creates a missing section", mod.apply_finding(tmp, {"file": "memory/clients/x/repos/r.md", "action": "add", "section": "## Decisions",
+check("U3 add creates a missing section", "applied" == mod.apply_finding(tmp, {"file": "memory/clients/x/repos/r.md", "action": "add", "section": "## Decisions",
       "new_text": "- use S3 locking", "target_text": ""}, None) and "## Decisions\n- use S3 locking" in f.read_text(), f.read_text())
-check("U4 remove deletes the line", mod.apply_finding(tmp, {"file": "memory/clients/x/repos/r.md", "action": "remove", "section": "",
+check("U4 remove deletes the line", "applied" == mod.apply_finding(tmp, {"file": "memory/clients/x/repos/r.md", "action": "remove", "section": "",
       "target_text": "- keep me", "new_text": ""}) and "keep me" not in f.read_text())
+A = lambda **kw: dict({"file": "memory/clients/x/repos/r.md", "section": "", "target_text": "", "new_text": ""}, **kw)
+f.write_text("# r\n## Current state\n- Deploy via Jenkins (legacy)\n- Deploy via Jenkins\n- use pnpm, never npm\n")
+check("U10 replace touches only the whole matching line", mod.apply_finding(tmp, A(action="replace", target_text="- Deploy via Jenkins", new_text="- Deploy via GHA")) == "applied"
+      and "- Deploy via Jenkins (legacy)" in f.read_text() and "- Deploy via GHA" in f.read_text() and "\n- Deploy via Jenkins\n" not in f.read_text(), f.read_text())
+check("U11 a line that only starts the same is never removed", mod.apply_finding(tmp, A(action="remove", target_text="- use pnpm")) == "missing" and "never npm" in f.read_text())
+check("U12 a target ending in a newline does not glue lines", mod.apply_finding(tmp, A(action="replace", target_text="- Deploy via GHA (as of 2026-10-20)\n", new_text="- Deploy via Argo"), "2026-10-22") in ("applied", "missing")
+      and all(l.count("- ") <= 1 for l in f.read_text().splitlines()), f.read_text())
+check("U13 adding the same line twice is a duplicate", mod.apply_finding(tmp, A(action="add", section="## Current state", new_text="- Deploy via GHA"), "2026-10-20") == "duplicate")
+check("U14 a section name without # still lands under its heading", mod.apply_finding(tmp, A(action="add", section="Current state", new_text="- queue alarms in Terraform")) == "applied"
+      and f.read_text().count("## Current state") == 1, f.read_text())
+g2 = tmp / "memory/clients/x/repos/fence.md"
+g2.write_text("# f\n## Notes\n```\n# not a heading\n```\n- a\n")
+check("U15 a # line inside a code fence is not a section", mod.apply_finding(tmp, dict(A(action="add", section="## Notes", new_text="- b"), file="memory/clients/x/repos/fence.md")) == "applied"
+      and g2.read_text().index("- b") > g2.read_text().index("```\n- a"), g2.read_text())
+g3 = tmp / "memory/clients/x/repos/crlf.md"
+g3.write_bytes("# c\r\n## S\r\n- caf\xe9 line\r\n".encode("latin-1"))
+check("U16 CRLF and odd bytes survive an edit", mod.apply_finding(tmp, dict(A(action="add", section="## S", new_text="- new"), file="memory/clients/x/repos/crlf.md")) == "applied"
+      and b"\r\n- new" in g3.read_bytes() and b"caf\xe9" in g3.read_bytes(), g3.read_bytes())
+check("U17 first JSON object wins over prose and a second object", mod.parse_json_reply('Here: {"a": 1} and also {"b": 2}') == {"a": 1})
+ctxu = {"wt": tmp, "parsed": {}, "texts": {}, "roots": {"shop": str(tmp)}}
+fx = mod.check_findings([{"id": "x", "action": "remove", "file": "memory/clients/x/repos/r.md", "target_text": "- Deploy via Jenkins (legacy)",
+                          "summary": "gone", "confidence": "high", "evidence": [{"source": "memory:memory/clients/x/repos/r.md", "quote": "- Deploy via Jenkins (legacy)"}]}], "x", ctxu)
+check("U18 a line is not evidence for changing itself", fx[0].get("rejected") and "its only evidence is the file it changes" in fx[0]["rejected"], fx[0].get("rejected"))
+fx = mod.check_findings([{"id": "y", "action": "add", "file": "memory/clients/x/repos/r.md", "section": "## S", "new_text": "- leak", "summary": "x", "confidence": "high",
+                          "evidence": [{"source": "repo:shop//etc/hostname", "quote": "a"}]}], "x", ctxu)
+check("U19 a repo path cannot escape the repo", fx[0].get("rejected") and "not in this scope" in fx[0]["rejected"], fx[0].get("rejected"))
 check("U5 JSON reply in a fence is read", mod.parse_json_reply('Here:\n```json\n{"findings": []}\n```') == {"findings": []})
 check("U6 prose reply is not JSON", mod.parse_json_reply("I found some things.") is None)
 check("U7 held inbox line goes to that inbox, not scratch", mod._held_target("general", "memory/inbox/acme/shop.md") == "memory/inbox/acme/shop.md")
@@ -194,7 +220,22 @@ check("5 the fresh check rejecting a finding drops it", any(d.get("rejected_by")
 r = scenario({"MOCK_VERIFY": "unsure"})
 check("5 an unsure fresh check makes questions, nothing saved", not by(r, applied=True) and any("independent check" in (d.get("held_reason") or "") for d in r["decisions"]))
 check("5 the fresh check never sees the hunters' summaries or confidence",
-      all("summary" not in c and "confidence" not in c for c in json.load(open(M + "/cycles/" + r["id"] + "/changes-acme.json"))["changes"]))
+      all("summary" not in c and "confidence" not in c for c in json.load(open(M + "/cycles/" + r["id"] + "/verify-acme/changes.json"))["changes"]))
+
+calls = [json.loads(l) for l in open(H + "/mock-calls.log")]
+ver = [c for c in calls if c["kind"] == "verify"][-1]
+check("5 the fresh check can open only the sessions, its change list and the repos",
+      ver["dirs"] and all(not d.rstrip("/").endswith(r["id"]) for d in ver["dirs"]) and any(d.endswith("/verify-acme") for d in ver["dirs"]), ver["dirs"])
+hun = [c for c in calls if c["kind"].startswith("hunt")][-1]
+check("5 hunters cannot open the run folder with logs and other findings", all(not d.rstrip("/").endswith(r["id"]) for d in hun["dirs"]), hun["dirs"])
+
+# ---------- 5b. an inbox note is only cleared once what it says is filed ----------
+note("- 2026-10-22: the cdn cache is purged on every deploy")
+r = scenario({"MOCK_HUNT_BADQUOTE": "1"})
+check("5b the add was dropped, so the note stays in the inbox", "cdn cache is purged" in open(INBOX).read()
+      and any(d.get("dropped") == "kept" for d in r["decisions"]), [(d["type"], d.get("dropped"), d.get("drop_reason")) for d in r["decisions"]])
+r = scenario({})
+check("5b next time it is filed and cleared", "cdn cache is purged" in open(CTX).read() and "cdn cache is purged" not in open(INBOX).read())
 
 # ---------- 6. failures ----------
 r = scenario({"MOCK_HUNT_FAIL": "HUNT new"})
@@ -215,6 +256,20 @@ check("7 questions API: plain where and accept destination", qq and qq[0]["where
 s, j = J("/api/decision", {"id": r["id"], "index": qq[0]["index"], "answer": "accept"})
 check("7 accept writes it into the client's notes directly, no loop through scratch",
       s == 200 and "Acme fact found in a general session" in open(M + "/memory/clients/acme/context.md").read(), j)
+
+# ---------- 7b. two answers at the same moment apply once ----------
+import threading
+sq = session(WEB, "think about a second region")
+S("create", "--sessions", sq, env={"MOCK_VERIFY": "unsure"})
+r = last()
+qi = next(i for i, d in enumerate(r["decisions"]) if not d.get("applied") and not d.get("dropped"))
+res = []
+ths = [threading.Thread(target=lambda: res.append(J("/api/decision", {"id": r["id"], "index": qi, "answer": "accept"}))) for _ in range(3)]
+[t_.start() for t_ in ths]; [t_.join() for t_ in ths]
+okc = sum(1 for s_, j_ in res if s_ == 200)
+check("7b only one of three simultaneous accepts goes through", okc == 1, res)
+qd = r["decisions"][qi]
+check("7b and the change is in memory exactly once", open(M + "/" + qd["file"]).read().count(qd["new_text"].strip()) == 1, qd)
 
 # ---------- 8. one-pass pipeline still works ----------
 cfg(pipeline="single")

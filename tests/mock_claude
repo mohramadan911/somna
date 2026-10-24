@@ -53,7 +53,7 @@ mode = os.environ.get("MOCK_MODE", "change")
 log = pathlib.Path(os.environ["HOME"]) / "mock-calls.log"
 with open(log, "a") as fh:
     fh.write(json.dumps({"max_turns": a[a.index("--max-turns") + 1] if "--max-turns" in a else None, "budget": a[a.index("--max-budget-usd") + 1] if "--max-budget-usd" in a else None, "cwd": os.getcwd(), "tools": a[a.index("--tools") + 1], "perm": a[a.index("--permission-mode") + 1],
-                         "kind": "map" if prompt.startswith("MAP REPO") else prompt.split("\n", 1)[0].lower() if prompt.startswith(("HUNT", "VALIDATE", "VERIFY")) else "cycle", "model": MODEL,
+                         "dirs": [a[i + 1] for i, x in enumerate(a) if x == "--add-dir"], "kind": "map" if prompt.startswith("MAP REPO") else prompt.split("\n", 1)[0].lower() if prompt.startswith(("HUNT", "VALIDATE", "VERIFY")) else "cycle", "model": MODEL,
                          "instructions": re.search(r"<instructions>\n(.*?)\n</instructions>", prompt, re.S).group(1) if "<instructions>" in prompt else None}) + "\n")
 
 if os.environ.get("MOCK_SLOW"):
@@ -126,7 +126,9 @@ if prompt.startswith("HUNT"):
                             "summary": "The inbox note was filed into the context, so it is cleared.",
                             "evidence": [{"source": "memory:" + _rel(inbox), "quote": line}], "refs": [], "confidence": "high"})
     if out and os.environ.get("MOCK_HUNT_BADQUOTE"):
-        out[0]["evidence"] = [{"source": "session:" + str(sid), "quote": "words that were never said"}]
+        tgt = next((x for x in out if x["action"] == "add"), None)
+        if tgt:
+            tgt["evidence"] = [{"source": "session:" + str(sid), "quote": "words that were never said"}]
     if out and os.environ.get("MOCK_HUNT_BADREF"):
         out[0]["refs"] = [{"repo": "nope", "path": "infra/missing.tf", "line": 3}]
     if out and os.environ.get("MOCK_HUNT_BADLINE") and pairs:

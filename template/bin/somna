@@ -1715,7 +1715,46 @@ def friendly_file(rel):
     return rel.replace("memory/", "", 1)
 
 
+_decide_lock = threading.Lock()
+
+
 def do_decide_held(did, index, accept):
+    # the page serves requests in threads: one answer at a time, re-read inside the lock, so a double click
+    # can never apply or queue the same change twice
+    with _decide_lock:
+        return _decide_held(did, index, accept)
+
+
+def _direct_apply(rec, d, did):
+    """Save an accepted staged change straight into memory. Returns a message, or None when it has to be queued."""
+    notes = d["file"].startswith(("memory/inbox/", "memory/scratch/"))
+    if running_pid():
+        return None
+    busy_files = [x for x in dirty_paths("memory") if not x.startswith(("memory/inbox/", "memory/scratch/"))]
+    if d["file"] in dirty_paths("memory") or (not notes and ([r["id"] for r in all_recs() if needs_review(r)] or busy_files)):
+        return None
+    try:
+        acquire_lock()
+    except SomnaError:
+        return None
+    try:
+        fnd = {"file": d["file"], "action": d["action"], "section": d.get("section") or "",
+               "target_text": d.get("target_text") or "", "new_text": d.get("new_text") or ""}
+        res = apply_finding(HOME, fnd, d.get("evidence_newest"))
+        if res == "missing":
+            return None
+        if res == "applied":
+            git("add", "--", d["file"])
+            git("commit", "-m", "accepted: {}".format((d.get("plain") or d["summary"])[:120]), "--", d["file"])
+        d["accepted_at"], d["accepted_to"], d["applied_directly"] = iso(utcnow()), d["file"], True
+        save_rec(rec)
+        log("info", "decision.accepted", "question accepted and saved to memory", cycle=did, file=d["file"], result=res)
+        return ("Saved to {}. New sessions use it." if res == "applied" else "Accepted. {} already says this.").format(friendly_file(d["file"]))
+    finally:
+        release_lock()
+
+
+def _decide_held(did, index, accept):
     rec = load_rec(did)
     decs = rec.get("decisions") or []
     if not isinstance(index, int) or not (0 <= index < len(decs)):
@@ -1731,26 +1770,23 @@ def do_decide_held(did, index, accept):
         log("info", "decision.dismissed", "held change dismissed", cycle=did, file=d["file"])
         return "Dismissed. It will not be applied."
     if d.get("staged") and d.get("action") in FINDING_ACTIONS:
-        waiting = [r["id"] for r in all_recs() if needs_review(r)]
-        if not running_pid() and not waiting and not dirty_paths("memory"):
-            fnd = {"file": d["file"], "action": d["action"], "section": d.get("section") or "",
-                   "target_text": d.get("target_text") or "", "new_text": d.get("new_text") or ""}
-            if apply_finding(HOME, fnd, d.get("evidence_newest")):
-                git("add", "--", d["file"])
-                git("commit", "-m", "accepted: {}".format((d.get("plain") or d["summary"])[:120]), "--", d["file"])
-                d["accepted_at"], d["accepted_to"], d["applied_directly"] = iso(utcnow()), d["file"], True
-                save_rec(rec)
-                log("info", "decision.accepted", "question accepted and saved to memory", cycle=did, file=d["file"])
-                return "Saved to {}. New sessions use it.".format(friendly_file(d["file"]))
+        msg = _direct_apply(rec, d, did)
+        if msg:
+            return msg
         # memory is busy (a run, a waiting proposal or unsaved edits) or the text moved on: queue it for the next cycle
-    rel = d.get("accept_to") or _held_target(d["group"], d["file"], d.get("scope"))
+    rel = _held_target(d["group"], d["file"], d.get("scope")) if d.get("staged") else (d.get("accept_to") or _held_target(d["group"], d["file"], d.get("scope")))
     if d.get("staged"):
-        rel = _held_target(d["group"], d["file"], d.get("scope"))
+        tgt, new = (d.get("target_text") or "").replace("\n", " "), (d.get("new_text") or "").replace("\n", " ")
+        what = {"add": "add \u00ab{}\u00bb{}".format(new, " under " + d["section"] if d.get("section") else ""),
+                "replace": "replace \u00ab{}\u00bb with \u00ab{}\u00bb".format(tgt, new),
+                "remove": "remove \u00ab{}\u00bb".format(tgt)}[d["action"]]
+    else:
+        what = d.get("proposed") or d["summary"]
     f = HOME / rel
     f.parent.mkdir(parents=True, exist_ok=True)
     if not f.exists():
         f.write_text("# Notes for the next cycle\nOne dated line per fact.\n")
-    line = "- {}: [owner accepted, from {}] {}{}\n".format(dt.date.today(), did, (d.get("proposed") or d["summary"]).replace("\n", " ")[:900],
+    line = "- {}: [owner accepted, from {}] {}{}\n".format(dt.date.today(), did, what.replace("\n", " ")[:900],
                                                          " (for {})".format(d["file"]) if d["file"] else "")
     with open(str(f), "a") as fh:
         fh.write(line)
@@ -1832,7 +1868,7 @@ HUNT_CLASSES["all"] = ("All kinds of change",
 FINDING_ACTIONS = ("add", "replace", "remove")
 SOURCE_RE = re.compile(r"^(session|commit|memory|repo):(.+)$")
 CORRECTION_RE = re.compile(r"\b(no,|don'?t|do not|never|always|from now on|instead|that'?s wrong|not correct|actually|stop)\b", re.I)
-_engine_slots = {"sem": None, "n": 0}
+_engine_slots = {"sem": None, "n": 0, "lock": threading.Lock()}
 
 DEFAULT_HUNT_PROMPT = """HUNT {{CLASS}}
 You are one of several hunters in a Somna cycle, an offline job that keeps the owner's agent memory correct between
@@ -1954,22 +1990,29 @@ def _contains(hay, needle):
 
 
 def parse_json_reply(text):
-    """The JSON object in an agent's final message: a fenced block or the outermost braces."""
-    text = str(text or "").strip()
-    m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
-    cand = m.group(1) if m else text[text.find("{"): text.rfind("}") + 1] if "{" in text else ""
-    try:
-        o = json.loads(cand)
-    except ValueError:
-        return None
-    return o if isinstance(o, dict) else None
+    """The first JSON object in an agent's final message, fenced or not."""
+    text = str(text or "")
+    dec = json.JSONDecoder()
+    for m in re.finditer(r"\{", text):
+        try:
+            o, _ = dec.raw_decode(text, m.start())
+        except ValueError:
+            continue
+        if isinstance(o, dict):
+            return o
+    return None
 
 
 def _engine_slot(cfg):
-    if _engine_slots["sem"] is None or _engine_slots["n"] != int(cfg.get("max_engines") or 4):
-        _engine_slots["n"] = max(1, int(cfg.get("max_engines") or 4))
-        _engine_slots["sem"] = threading.BoundedSemaphore(_engine_slots["n"])
-    return _engine_slots["sem"]
+    try:
+        n = max(1, min(int(cfg.get("max_engines") or 4), 32))
+    except (TypeError, ValueError):
+        n = 4
+    with _engine_slots["lock"]:
+        if _engine_slots["sem"] is None or _engine_slots["n"] != n:
+            _engine_slots["n"] = n
+            _engine_slots["sem"] = threading.BoundedSemaphore(n)
+        return _engine_slots["sem"]
 
 
 def _files_touched(parsed):
@@ -2047,6 +2090,17 @@ def _repo_roots_by_name(metas, reg, group):
     return out
 
 
+def _inside(root, rel):
+    """root/rel only if it stays inside root (no absolute paths, no ..), else None."""
+    try:
+        base = Path(root).resolve()
+        f = (base / str(rel).lstrip("/")).resolve()
+        f.relative_to(base)
+    except (ValueError, OSError, RuntimeError):
+        return None
+    return f if not str(rel).startswith("/") else None
+
+
 def _source_text(src, ctx):
     """(text, None) for a finding's source, or (None, plain reason it could not be opened)."""
     m = SOURCE_RE.match(str(src or "").strip())
@@ -2071,15 +2125,15 @@ def _source_text(src, ctx):
         return r.stdout[:400000], None
     if kind == "memory":
         rel = ref if ref.startswith("memory/") else "memory/" + ref
-        if ".." in rel:
+        f = _inside(ctx["wt"], rel)
+        if not f:
             return None, "bad memory path"
-        f = ctx["wt"] / rel
         return (f.read_text(errors="replace"), None) if f.is_file() else (None, "it quotes a memory file that does not exist")
     repo, _, path = ref.partition("/")
     root = ctx["roots"].get(repo)
-    if not root or ".." in path:
-        return None, "it quotes a repo that is not in this scope"
-    f = Path(root) / path
+    f = _inside(root, path) if root else None
+    if not f:
+        return None, "it quotes a repo or path that is not in this scope"
     return (f.read_text(errors="replace"), None) if f.is_file() else (None, "it quotes {} which does not exist in {}".format(path, repo))
 
 
@@ -2149,15 +2203,15 @@ def check_findings(raw, group, ctx):
         item["checks"].append({"check": "schema", "ok": True, "detail": "well formed"})
         item["in_scope"] = _scope_ok(group, rel)
         f_path = ctx["wt"] / rel
-        cur = f_path.read_text(errors="replace") if f_path.is_file() else ""
+        cur = _read_mem(f_path)[0]
         if item["action"] in ("replace", "remove"):
             if not cur:
                 item["rejected"] = "It wants to change a file that does not exist."
-            elif not _contains(cur, item["target_text"]):
+            elif not _match_lines(cur.splitlines(), item["target_text"]):
                 item["rejected"] = "The text it wants to change is not in the file (it may already have changed)."
             item["checks"].append({"check": "target", "ok": "rejected" not in item, "detail": "text to change found in the file" if "rejected" not in item else "text to change not found"})
         elif item["action"] == "add":
-            dup = bool(cur) and all(_contains(cur, l) for l in item["new_text"].splitlines() if l.strip(" -*"))
+            dup = bool(cur) and _already_has(cur, item["new_text"])
             if dup:
                 item["rejected"] = "Memory already says this."
             item["checks"].append({"check": "target", "ok": not dup, "detail": "not in memory yet" if not dup else "already in memory"})
@@ -2166,7 +2220,14 @@ def check_findings(raw, group, ctx):
             out.append(item)
             continue
         found, why = 0, []
+        notes_file = rel.startswith(("memory/inbox/", "memory/scratch/"))
         for e in item["evidence"]:
+            src = e["source"].split(":", 1)
+            if not notes_file and len(src) == 2 and src[0] == "memory" and ("memory/" + src[1].strip().replace("memory/", "", 1)) == rel:
+                # a line cannot be the evidence for changing itself
+                e["found"] = False
+                why.append("its only evidence is the file it changes")
+                continue
             text, err = _source_text(e["source"], ctx)
             if err:
                 why.append(err)
@@ -2191,8 +2252,8 @@ def check_findings(raw, group, ctx):
             if not root:
                 bad_refs.append("repo {} is not in this scope".format(r["repo"] or "?"))
                 continue
-            p = Path(root) / r["path"]
-            if not r["path"] or ".." in r["path"] or not p.exists():
+            p = _inside(root, r["path"]) if r["path"] else None
+            if not p or not p.exists():
                 bad_refs.append("{} does not exist in {}".format(r["path"] or "(no path)", r["repo"]))
                 continue
             if p.is_file() and (r["line"] or r["symbol"]):
@@ -2211,6 +2272,48 @@ def check_findings(raw, group, ctx):
     return out
 
 
+def _read_mem(p):
+    """Text of a memory file and its line ending. Odd bytes survive a read and write unchanged."""
+    raw = p.read_bytes().decode("utf-8", "surrogateescape") if p.is_file() else ""
+    return raw.replace("\r\n", "\n"), ("\r\n" if "\r\n" in raw else "\n")
+
+
+def _write_mem(p, text, nl):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(text.replace("\n", nl).encode("utf-8", "surrogateescape"))
+
+
+def _match_lines(lines, target):
+    """(first, last) line index of target as whole lines (whitespace-insensitive, blank lines between ignored), or None."""
+    want = [_norm(x) for x in str(target or "").splitlines() if x.strip()]
+    if not want:
+        return None
+    for i in range(len(lines)):
+        if _norm(lines[i]) != want[0]:
+            continue
+        win = [j for j in range(i, len(lines)) if lines[j].strip()][:len(want)]
+        if len(win) == len(want) and [_norm(lines[j]) for j in win] == want:
+            return win[0], win[-1]
+    return None
+
+
+def _headings(lines):
+    """Indexes of real Markdown headings, skipping lines inside code fences."""
+    out, fence = [], False
+    for i, l in enumerate(lines):
+        if l.lstrip().startswith("```"):
+            fence = not fence
+        elif not fence and re.match(r"^#{1,6} ", l):
+            out.append(i)
+    return out
+
+
+def _already_has(cur, new_text):
+    lines = [_norm(l) for l in cur.splitlines()]
+    want = [_norm(re.sub(r"\s*\(as of \d{4}-\d{2}-\d{2}\)\s*$", "", l)) for l in str(new_text or "").splitlines() if l.strip(" -*")]
+    return bool(want) and all(any(w and (x == w or x.startswith(w + " (as of ")) for x in lines) for w in want)
+
+
 def _with_asof(rel, text, day):
     if not rel.startswith("memory/clients/") or not day:
         return text
@@ -2224,46 +2327,69 @@ def _with_asof(rel, text, day):
 
 
 def apply_finding(wt, f, day=None):
-    """Apply one finding to the working copy. Returns True when the file changed."""
-    p = wt / f["file"]
-    cur = p.read_text() if p.is_file() else ""
-    new_text = _with_asof(f["file"], f.get("new_text") or "", day)
+    """Apply one finding to the working copy. Returns "applied", "duplicate" (already there) or "missing"
+    (the text to change is gone). Whole lines only, so a line that merely starts the same is never touched."""
+    rel = str(f.get("file") or "")
+    if not rel.startswith("memory/") or ".." in Path(rel).parts or not rel.endswith(".md"):
+        return "missing"
+    p = Path(wt) / rel
+    cur, nl = _read_mem(p)
+    lines = cur.splitlines()
+    new_lines = [l for l in _with_asof(rel, f.get("new_text") or "", day).splitlines()]
     if f["action"] == "add":
-        sec = f.get("section") or ""
-        lines = cur.splitlines()
-        if sec and sec.startswith("#"):
-            idx = next((i for i, l in enumerate(lines) if _norm(l) == _norm(sec)), None)
-            if idx is None:
-                lines += ([""] if lines and lines[-1].strip() else []) + [sec] + new_text.splitlines()
-            else:
-                end = next((j for j in range(idx + 1, len(lines)) if lines[j].startswith("#")), len(lines))
-                while end > idx + 1 and not lines[end - 1].strip():
-                    end -= 1
-                lines[end:end] = new_text.splitlines()
+        if cur and _already_has(cur, f.get("new_text")):
+            return "duplicate"
+        sec = str(f.get("section") or "").strip()
+        if sec and not sec.startswith("#"):
+            sec = "## " + sec
+        heads = _headings(lines)
+        idx = next((i for i in heads if _norm(lines[i]) == _norm(sec)), None) if sec else None
+        if sec and idx is None:
+            lines += ([""] if lines and lines[-1].strip() else []) + [sec] + new_lines
+        elif sec:
+            end = next((j for j in heads if j > idx), len(lines))
+            while end > idx + 1 and not lines[end - 1].strip():
+                end -= 1
+            lines[end:end] = new_lines
         else:
-            lines += new_text.splitlines()
-        out = "\n".join(lines).rstrip() + "\n"
+            lines += new_lines
     else:
-        tgt = f["target_text"]
-        if tgt in cur:
-            out = cur.replace(tgt, new_text if f["action"] == "replace" else "", 1)
-        else:
-            # whitespace differs: match line by line on normalized text
-            lines, want = cur.splitlines(), [_norm(x) for x in tgt.splitlines() if x.strip()]
-            out = None
-            for i in range(len(lines)):
-                win = [j for j in range(i, len(lines)) if lines[j].strip()][:len(want)]
-                if len(win) == len(want) and [_norm(lines[j]) for j in win] == want:
-                    rep = new_text.splitlines() if f["action"] == "replace" else []
-                    out = "\n".join(lines[:win[0]] + rep + lines[win[-1] + 1:]) + "\n"
-                    break
-            if out is None:
-                return False
-        out = re.sub(r"\n{3,}", "\n\n", out)
+        hit = _match_lines(lines, f.get("target_text"))
+        if not hit:
+            return "missing"
+        lines[hit[0]:hit[1] + 1] = new_lines if f["action"] == "replace" else []
+    out = re.sub(r"\n{3,}", "\n\n", "\n".join(lines).rstrip("\n") + "\n")
     if out == cur:
-        return False
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(out)
+        return "duplicate"
+    _write_mem(p, out, nl)
+    return "applied"
+
+
+def _note_text(line):
+    s = re.sub(r"^\s*[-*]\s*", "", str(line or ""))
+    s = re.sub(r"^\d{4}-\d{2}-\d{2}:\s*", "", s)
+    s = re.sub(r"^\[owner accepted[^\]]*\]\s*", "", s)
+    s = re.sub(r"^CORRECTION:\s*", "", s)
+    s = re.sub(r"\s*\(for memory/[^)]*\)\s*$", "", s)
+    return s.strip()
+
+
+def _note_filed(wt, group, f, cited=()):
+    """True when every inbox or scratch line a finding wants to clear is already said somewhere in this scope's memory."""
+    allowed, denied = _group_scope(group)
+    files = []
+    for a in allowed:
+        base = Path(wt) / a
+        for p in (base.rglob("*.md") if base.is_dir() else []):
+            rel = str(p.relative_to(wt))
+            if rel.startswith(("memory/inbox/", "memory/scratch/")) or (denied and rel.startswith(tuple(denied))):
+                continue
+            files.append(_read_mem(p)[0])
+    hay = "\n".join(files)
+    for line in str(f.get("target_text") or "").splitlines():
+        txt = _note_text(line)
+        if txt and _norm(line) not in cited and not _contains(hay, txt):
+            return False
     return True
 
 
@@ -2347,25 +2473,34 @@ def run_staged(g, ctx):
             save_rec(rec)
         log("info", "stage." + name, "{}: {}".format(title, name), group=g, **{k: v for k, v in kw.items() if k != "status"})
 
-    def call(kind, prompt, mdl):
+    sdir = ddir / "sessions" / g
+    ulock = threading.Lock()
+
+    def call(kind, prompt, mdl, dirs):
+        """One read-only Claude run. It can open only the folders it is given: the hunters never see the run's
+        logs, and the fresh check never sees the findings, their summaries or anyone's reasoning."""
         (ddir / "prompt-{}-{}.md".format(slug(g), kind)).write_text(prompt)
-        cmd = _engine_cmd(cfg, engine, prompt, "Read,Glob,Grep", [ddir] + roots, edits=False, model=mdl)
+        cmd = _engine_cmd(cfg, engine, prompt, "Read,Glob,Grep", [d for d in dirs if d] + roots, edits=False, model=mdl)
         with _engine_slot(cfg):
             if cancel_requested(ddir):
                 raise CycleCanceled()
             u = _run_engine(cmd, gwt, cfg["timeout_minutes"] * 60, ddir / "engine-{}.log".format(slug(g)), "cycle " + g,
                             ddir=ddir, group=g, roots=[(gwt, ""), (ddir, "run/")], usage_key="{}:{}".format(g, kind))
-        usage_all["total_cost_usd"] += u.get("total_cost_usd") or 0
-        usage_all["num_turns"] += u.get("num_turns") or 0
-        usage_all["memory_reads"] += u.get("memory_reads") or 0
-        for k, v in (u.get("tokens") or {}).items():
-            usage_all["tokens"][k] = usage_all["tokens"].get(k, 0) + (v or 0)
+        with ulock:
+            usage_all["total_cost_usd"] += u.get("total_cost_usd") or 0
+            usage_all["num_turns"] += u.get("num_turns") or 0
+            usage_all["memory_reads"] += u.get("memory_reads") or 0
+            for k, v in (u.get("tokens") or {}).items():
+                usage_all["tokens"][k] = usage_all["tokens"].get(k, 0) + (v or 0)
         return parse_json_reply(u.get("result"))
 
     # recon
     activity, brief = build_activity(g, metas, parsed_by_id, reg, ctx["since"])
-    apath = ddir / "activity-{}.md".format(slug(g))
+    bdir = ddir / "brief-{}".format(slug(g))
+    bdir.mkdir(exist_ok=True)
+    apath = bdir / "activity.md"
     apath.write_text(brief)
+    (ddir / "activity-{}.md".format(slug(g))).write_text(brief)
     activity["title"] = title
     with rec_lock:
         rec.setdefault("activity", {})[g] = activity
@@ -2392,7 +2527,7 @@ def run_staged(g, ctx):
         p = _fill(hunt_tpl, dict(subs, **{"{{CLASS}}": c, "{{CLASS_TITLE}}": HUNT_CLASSES[c][0],
                                           "{{CLASS_TASK}}": _fill(HUNT_CLASSES[c][1], subs)}))
         try:
-            o = call("hunt-" + c, p, cfg.get("hunt_model") or model)
+            o = call("hunt-" + c, p, cfg.get("hunt_model") or model, [sdir, bdir])
         except CycleCanceled:
             raise
         except SomnaError as e:
@@ -2428,18 +2563,23 @@ def run_staged(g, ctx):
     # validate: try to disprove
     validated = not small and bool(alive)
     if validated:
-        fpath = ddir / "findings-{}.json".format(slug(g))
+        vdir = ddir / "validate-{}".format(slug(g))
+        vdir.mkdir(exist_ok=True)
+        fpath = vdir / "findings.json"
         fpath.write_text(json.dumps({"findings": [{k: f[k] for k in ("id", "action", "file", "section", "target_text", "new_text",
                                                                         "summary", "evidence", "refs", "confidence")} for f in alive]}, indent=1))
         vt = (HOME / "engine" / "validate-prompt.md")
         vt = vt.read_text() if vt.exists() else DEFAULT_VALIDATE_PROMPT
         stage("validate", status="running", findings=len(alive))
         try:
-            o = call("validate", _fill(vt, dict(subs, **{"{{FINDINGS_PATH}}": str(fpath)})), cfg.get("check_model") or model)
+            o = call("validate", _fill(vt, dict(subs, **{"{{FINDINGS_PATH}}": str(fpath)})), cfg.get("check_model") or model, [sdir, bdir, vdir])
+        except CycleCanceled:
+            raise
         except SomnaError as e:
             o = None
             log("warn", "validate.failed", str(e), group=g)
-        verdicts = {str(v.get("id")): v for v in ((o or {}).get("verdicts") or []) if isinstance(v, dict)}
+        vl = (o or {}).get("verdicts")
+        verdicts = {str(v.get("id")): v for v in (vl if isinstance(vl, list) else []) if isinstance(v, dict)}
         for f in alive:
             v = verdicts.get(f["id"])
             if not v:
@@ -2464,7 +2604,9 @@ def run_staged(g, ctx):
 
     # verify: a fresh agent, sources only, no reasoning
     if alive:
-        cpath = ddir / "changes-{}.json".format(slug(g))
+        xdir = ddir / "verify-{}".format(slug(g))
+        xdir.mkdir(exist_ok=True)
+        cpath = xdir / "changes.json"
         cpath.write_text(json.dumps({"changes": [{"id": f["id"], "file": f["file"], "action": f["action"], "section": f["section"],
                                                    "target_text": f["target_text"], "new_text": f["new_text"],
                                                    "sources": [e["source"] for e in f["evidence"]]} for f in alive]}, indent=1))
@@ -2472,11 +2614,14 @@ def run_staged(g, ctx):
         vf = vf.read_text() if vf.exists() else DEFAULT_VERIFY_PROMPT
         stage("verify", status="running", changes=len(alive))
         try:
-            o = call("verify", _fill(vf, dict(subs, **{"{{CHANGES_PATH}}": str(cpath)})), cfg.get("check_model") or model)
+            o = call("verify", _fill(vf, dict(subs, **{"{{CHANGES_PATH}}": str(cpath)})), cfg.get("check_model") or model, [sdir, xdir])
+        except CycleCanceled:
+            raise
         except SomnaError as e:
             o = None
             log("warn", "verify.failed", str(e), group=g)
-        checks = {str(v.get("id")): v for v in ((o or {}).get("checks") or []) if isinstance(v, dict)}
+        cl = (o or {}).get("checks")
+        checks = {str(v.get("id")): v for v in (cl if isinstance(cl, list) else []) if isinstance(v, dict)}
         for f in alive:
             v = checks.get(f["id"]) or {}
             f["verifier"] = {"verdict": str(v.get("verdict") or "missing").lower(), "reason": _norm(v.get("reason"))[:400]}
@@ -2492,7 +2637,7 @@ def run_staged(g, ctx):
     metas_by_id = {m["id"]: m for m in metas}
     dating = {"sessions": {m["id"]: m.get("last_activity") for m in metas}, "read_sessions": load_state().get("read_sessions", {}),
               "roots": roots}
-    cache, decs, applied_files = {}, [], set()
+    cache, decs, applied_files, ready = {}, [], set(), []
     for f in findings:
         ids = []
         for e in f.get("evidence") or []:
@@ -2538,13 +2683,28 @@ def run_staged(g, ctx):
         if why:
             d.update(applied=False, held_reason="; ".join(why))
         else:
-            ok = apply_finding(gwt, f, newest)
-            d["applied"] = bool(ok)
-            if ok:
-                applied_files.add(f["file"])
-            else:
-                d.update(dropped="rejected", drop_reason="It could not be applied: the text had changed.", dismissed_at=iso(utcnow()))
+            ready.append((d, f, newest))
         decs.append(d)
+    # changes first, then clearing notes: an inbox or scratch line is only removed once what it says is filed
+    cited = set()
+    note_removes = [x for x in ready if x[1]["action"] == "remove" and x[1]["file"].startswith(("memory/inbox/", "memory/scratch/"))]
+    for d, f, newest in [x for x in ready if x not in note_removes] + note_removes:
+        if (d, f, newest) in note_removes and not _note_filed(gwt, g, f, cited):
+            d.update(applied=False, dropped="kept", dismissed_at=iso(utcnow()),
+                     drop_reason="Kept the note: what it says is not filed anywhere yet, so it stays for the next cycle.")
+            continue
+        res = apply_finding(gwt, f, newest)
+        d["applied"] = res == "applied"
+        if res in ("applied", "duplicate") and f["action"] != "remove":
+            # the notes this change was built from count as filed
+            cited.update(_norm(e.get("quote")) for e in f.get("evidence") or []
+                         if str(e.get("source") or "").startswith(("memory:memory/inbox/", "memory:memory/scratch/", "memory:inbox/", "memory:scratch/")))
+        if res == "applied":
+            applied_files.add(f["file"])
+        elif res == "duplicate":
+            d.update(dropped="rejected", drop_reason="Memory already says this.", dismissed_at=iso(utcnow()))
+        else:
+            d.update(dropped="rejected", drop_reason="It could not be applied: the text had changed.", dismissed_at=iso(utcnow()))
     stage("apply", status="done", saved=sum(1 for d in decs if d.get("applied")),
           questions=sum(1 for d in decs if not d.get("applied") and not d.get("dropped")),
           dropped=sum(1 for d in decs if d.get("dropped")))
@@ -2798,6 +2958,13 @@ def _do_create(since_hours=None, since_last=False, dry_run=False, out=print, ins
                     run.update(status="failed", error=str(e), error_type=e.etype or "internal_error")
                     save_rec(rec)
                 return {"group": g, "ok": False, "report": "# {}\n\n**This part failed:** {}\n".format(title, e)}
+            except Exception as e:
+                # a bug in one client's run must not throw away the other clients' work
+                log("error", "run.crashed", "{} crashed: {!r}".format(title, e), group=g, traceback=traceback.format_exc()[-2000:])
+                with rec_lock:
+                    run.update(status="failed", error="internal error: {!r}".format(e)[:300], error_type="internal_error")
+                    save_rec(rec)
+                return {"group": g, "ok": False, "report": "# {}\n\n**This part failed:** internal error, see the run log.\n".format(title)}
             allowed, denied = _group_scope(g)
             bad = _enforce_scope(gwt, allowed, denied, g)
             sha = None
