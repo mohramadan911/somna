@@ -32,8 +32,24 @@ TO="$(cd "$TO_PARENT" && pwd)/$(basename "$TO")"
 [ -e "$TO" ] && die "$TO already exists. Move it away first, or pick another place with --to"
 case "$TO/" in "$FROM"/*) die "--to must not be inside $FROM";; esac
 case "$TO/" in "$KIT_DIR"/*) die "--to must not be inside the Somna download ($KIT_DIR)";; esac
-if [ -n "$(git -C "$FROM" branch --list 'dream/*')" ]; then
-  die "a proposal is still waiting in the old tool. Adopt or discard it there first (dream ui), then run this again"
+# a dream/* branch only matters when its run still waits for review; failed, canceled or crashed runs can
+# leave branches behind, and those are cleaned up in the copy
+WAITING="$(python3 -c '
+import json, os, subprocess, sys
+home = sys.argv[1]
+refs = subprocess.run(["git", "-C", home, "branch", "--list", "dream/*", "--format=%(refname:short)"],
+                      capture_output=True, text=True).stdout.split()
+for b in refs:
+    did = b.split("/", 1)[1]
+    try:
+        rec = json.load(open(os.path.join(home, "dreams", did, "dream.json")))
+    except (OSError, ValueError):
+        continue
+    if rec.get("status") == "completed" and rec.get("outputs") and not rec.get("review") and not rec.get("archived_at"):
+        print(did)
+' "$FROM")"
+if [ -n "$WAITING" ]; then
+  die "a proposal is still waiting in the old tool: $(echo $WAITING). Adopt or discard it there first (dream ui), then run this again"
 fi
 if [ -n "$(git -C "$FROM" status --porcelain -- memory)" ]; then
   die "the old memory has unsaved edits. Commit or discard them first (cd $FROM && git status)"
@@ -46,6 +62,7 @@ cp -R "$FROM" "$TO"
 cd "$TO"
 rm -rf .dream-worktrees bin/dream
 git worktree prune 2>/dev/null || true
+for b in $(git branch --list 'dream/*' --format='%(refname:short)'); do git branch -D "$b" >/dev/null 2>&1 || true; done
 mkdir -p engine cycles
 for f in config.json repos.json steering.md; do
   if [ -f "dreaming/$f" ]; then mv "dreaming/$f" "engine/$f"; fi
