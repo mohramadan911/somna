@@ -16,8 +16,21 @@
   "restrict_tools": true,
   "no_session_persistence": true,
   "extra_claude_args": [],
-  "exclude_project_patterns": ["somna-worktrees"],
+  "exclude_project_patterns": [
+    "somna-worktrees"
+  ],
   "auto_close_empty": true,
   "notify": true,
-  "ui_port": 4747
+  "ui_port": 4747,
+  "pipeline": "staged",
+  "hunters": [
+    "stale",
+    "new",
+    "corrections",
+    "tidy"
+  ],
+  "hunt_model": "",
+  "check_model": "",
+  "small_night_kb": 40,
+  "max_engines": 4
 }

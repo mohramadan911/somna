@@ -224,6 +224,26 @@ textarea.small{min-height:96px}
 .dec .f{font:12.5px var(--mono);color:var(--muted);word-break:break-all}
 .dec .sm{flex:1 1 100%;font-size:14px} .dec .ev{font:12px var(--mono);color:var(--dim)}
 .dec .qa{display:flex;gap:8px;flex:1 1 100%} .dec .btn{min-height:34px;padding:0 12px;font-size:13px}
+.dc{display:flex;flex-direction:column;gap:8px;padding:14px 16px;border-radius:14px;background:var(--line-2)}
+.dc.held{background:var(--warn-bg)} .dc.bad{background:var(--del-bg)} .dc.gone{opacity:.85}
+.dc .top{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-size:13px;color:var(--muted)}
+.dc .kind{font-weight:650;color:var(--text);font-size:13.5px}
+.dc .plain{margin:0;font-size:15px;line-height:1.45;color:var(--text)}
+.dc .chg{font:12.5px/1.5 var(--mono);border-radius:10px;overflow:hidden;border:1px solid var(--glass-line)}
+.dc .chg div{padding:3px 10px;white-space:pre-wrap;word-break:break-word}
+.dc .chg .a{background:var(--add-bg);color:var(--add-fg)} .dc .chg .d{background:var(--del-bg);color:var(--del-fg);text-decoration:line-through}
+.dc .evs{display:flex;flex-direction:column;gap:4px}
+.dc .evl{font-size:13px;color:var(--muted)} .dc .evl b{color:var(--text);font-weight:600} .dc .evl q{color:var(--text)}
+.dc .ck{display:flex;flex-wrap:wrap;gap:6px}
+.dc .ck span{font-size:12px;padding:2px 8px;border-radius:999px;background:var(--chip);border:1px solid var(--glass-line)}
+.dc .ck span.ok{color:var(--add-fg)} .dc .ck span.no{color:var(--del-fg)}
+.dc .why{font-size:13px;color:var(--gold-ink)} .dc .gonewhy{font-size:13px;color:var(--muted)}
+.dc .qa{display:flex;flex-wrap:wrap;gap:8px} .dc .btn{min-height:34px;padding:0 12px;font-size:13px}
+.dc details.tech summary{cursor:pointer;font-size:12.5px;color:var(--dim)} .dc details.tech pre{font:12px/1.5 var(--mono);white-space:pre-wrap;word-break:break-all;margin:6px 0 0;color:var(--muted)}
+.dayh{margin:14px 2px 2px;font-size:13px;font-weight:650;color:var(--muted);letter-spacing:.02em}
+.did{display:flex;flex-direction:column;gap:6px;margin-top:8px} .did .s{font-size:14px} .did .s small{color:var(--dim)}
+.pipe{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12.5px;margin-top:8px}
+.pipe span{padding:3px 9px;border-radius:999px;background:var(--chip);border:1px solid var(--glass-line)} .pipe i{color:var(--dim);font-style:normal}
 .hq{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;min-height:22px;padding:0;margin-left:6px;border-radius:50%;
   border:1px solid var(--glass-line);background:var(--glass-2);color:var(--indigo);font:700 12px var(--sans);cursor:pointer;vertical-align:middle;flex:none}
 .hq:hover{background:var(--indigo);color:#fff} header .hq{border-color:rgba(255,255,255,.35);background:rgba(255,255,255,.12);color:#fff}
@@ -349,7 +369,7 @@ const HELP = {
   questions: ["Checks and questions", "Things Somna could not decide on its own, like whether a repo really belongs to a client. Answer with the buttons; answers are remembered."],
   adopt: ["Adopt", "Merges the proposal into your memory after checking nobody changed memory since the run started, and records it in CHANGELOG.md. New sessions use it right away. Git keeps the old version."],
   discard: ["Discard", "Deletes the proposal. Your memory stays exactly as it was."],
-  decisions: ["Decisions", "Every change comes with a confidence and the dates of its evidence. High: two or more sources, or something you said. Medium: one clear source. Low: inferred or weak, so it is held back for you. Accept queues it for the next cycle, in the place the button names; Dismiss drops it. Changes whose evidence is older than the current context are dropped automatically."],
+  decisions: ["What changed", "Every change says in plain words what it does and why, where it goes, and the moments behind it: the day, the repo and what you asked. Sure: two sources or something you said. Fairly sure: one clear source. Not sure: held for you. In the full pipeline a change is only saved after its quotes and code were checked, a check tried to disprove it, and a fresh agent confirmed it. Details shows the ids."],
   trial: ["Try it before adopting", "Starts a Claude Code session in the repo that gets the proposed context instead of the current one. Use it to see if the proposal helps. Nothing is adopted."],
   activity: ["Memory it read and wrote", "Which memory files Claude opened and changed during the run, from its own event stream."],
   versions: ["Versions", "Every saved version of this file. If an old version held a secret or personal data, Redact removes its content from history. The record that the version existed stays."],
@@ -373,7 +393,11 @@ const HELP = {
   run_digest_budget_kb: ["Reading budget per client run", "How much session text Claude reads in one client run. Small sessions are read in full first, then the big ones share what is left. 400 KB is about 100k tokens."],
   session_max_kb: ["Most one session can take", "The most of the budget a single session may use, so one very long session cannot crowd out the rest. Above this it is shortened: tool calls and long output first, your words and Claude's answers last. The full text stays available to Claude."],
   stale_after_days: ["Clean up current state after", "The cycle removes \"Current state\" items whose as-of date is older than this, unless newer sessions or commits confirm them. Git keeps the history."],
-  dropped: ["Dropped as outdated", "Held changes whose newest evidence is older than the file's last update. The newer context wins, so they are not asked as questions. Listed here only so you can see what was left out."],
+  pipeline: ["How changes are checked", "Full: code first writes down what you did. Then separate searches look for stale facts, new facts, your corrections and tidying. Code checks every quote word for word against your sessions and every file, line and function against the repo. Another run tries to disprove each finding, and a fresh agent that never saw the reasoning confirms it. Only changes that pass all of that are saved; doubtful ones become questions. It costs several Claude runs per client instead of one. One pass: a single run per client edits memory directly, cheaper, and nothing checks it independently."],
+  hunt_model: ["Model for finding changes", "Used by the searches that look for changes. Empty uses the cycle model."],
+  check_model: ["Model for the checks", "Used by the disprove step and the fresh check. A cheaper model like Haiku or Sonnet keeps cost down; they only read and compare. Empty uses the cycle model."],
+  did: ["What you did", "Built by Somna from your sessions and commits, before Claude is asked anything: when you worked, in which repo, what you asked first and which files changed. Below each client: the steps the cycle went through and what each one let through."],
+  dropped: ["Checked and dropped", "Findings that did not survive: a quote that is not in your sessions, code that does not exist, text that already changed, a check that disproved it, a fresh agent that disagreed, or evidence older than what memory already says. Listed so you can see what was left out and why."],
   sessions_read: ["Sessions read", "Each session's size, and how much of it the cycle read. Shortened sessions kept your words and Claude's answers first; the full text was available to Claude."],
   context_max_chars: ["Repo context size", "Target size of each repo context. The hook adds at most about 9,500 characters at session start."],
   remap_after_commits: ["Re-map suggestion", "Suggest Re-map after this many commits in a repo since its last map."],
@@ -547,21 +571,81 @@ document.addEventListener("click", (e) => {
   }
 });
 
+/* ---------- Decisions in plain words ---------- */
+const KIND = { new: "New", replaced: "Updated", removed: "Removed", corrected: "Your correction", merged: "Filed from your notes",
+  reorganized: "Tidied", verified: "Checked, still true", insight: "Lesson", unexplained: "Changed without a reason" };
+const SURE = { high: "sure", medium: "fairly sure", low: "not sure" };
+function dayName(s) {
+  if (!s) return "";
+  const d = new Date(String(s).length <= 10 ? s + "T12:00:00Z" : s);
+  return isNaN(d) ? String(s) : d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+}
+function whereOf(d) { return d.where || String(d.file || "").replace(/^memory\//, ""); }
+function evLine(e) {
+  if (e.kind === "session") return '<div class="evl"><b>' + esc(dayName(e.at)) + (e.repo ? " · " + esc(e.repo) : "") + "</b>" +
+    (e.title ? ' · you asked <q>' + esc(e.title) + "</q>" : " · a Claude Code session") + (e.quote && e.quote !== e.title ? '<br><span>said: <q>' + esc(e.quote) + "</q></span>" : "") + "</div>";
+  if (e.kind === "commit") return '<div class="evl"><b>' + esc(e.at ? dayName(e.at) : "commit") + (e.repo ? " · " + esc(e.repo) : "") + "</b> · commit " +
+    (e.title ? "<q>" + esc(e.title) + "</q>" : esc(e.id)) + "</div>";
+  if (e.kind === "answer") return '<div class="evl"><b>Your earlier answer</b> to a question</div>';
+  if (e.kind === "file") return '<div class="evl"><b>' + esc(/^memory\//.test(String(e.title || e.id)) ? friendly(e.title || e.id) : String(e.title || e.id)) + "</b>" + (e.quote ? " · <q>" + esc(e.quote) + "</q>" : "") + "</div>";
+  return '<div class="evl">' + esc(e.title || e.id) + "</div>";
+}
+function decCard(d, o) {
+  o = o || {};
+  const open = !d.applied && !d.dropped && !d.accepted_at && !d.dismissed_at;
+  const cls = d.dropped ? " gone" : open ? " held" : (d.synthetic || d.rule_broken) ? " bad" : "";
+  let h = '<div class="dc' + cls + '"><div class="top"><span class="kind">' + esc(KIND[d.type] || d.type) + "</span><span>in " + esc(whereOf(d)) + "</span>" +
+    (d.confidence ? "<span>· " + esc(SURE[d.confidence] || d.confidence) + "</span>" : "") +
+    (d.scope === "general" && d.group !== "general" ? '<span class="badge b-running">lesson for your notes</span>' : "") +
+    (d.rule_broken ? '<span class="badge b-failed">saved although not sure</span>' : "") + "</div>";
+  h += '<p class="plain">' + esc(d.synthetic ? "Claude changed this file without saying why." : (d.plain || d.summary)) + "</p>";
+  const rm = d.action === "replace" || d.action === "remove" ? d.target_text : "", add = d.action === "remove" ? "" : (d.new_text != null ? d.new_text : (open ? d.proposed : ""));
+  if (rm || add) h += '<div class="chg">' + (rm ? rm.split("\n").filter(Boolean).map((l) => '<div class="d">' + esc(l) + "</div>").join("") : "") +
+    (add ? add.split("\n").filter(Boolean).map((l) => '<div class="a">' + esc(l) + "</div>").join("") : "") + "</div>";
+  const ev = d.evidence_human || [];
+  if (ev.length) h += '<div class="evs">' + ev.slice(0, 4).map(evLine).join("") + (ev.length > 4 ? '<div class="evl">and ' + (ev.length - 4) + " more</div>" : "") + "</div>";
+  if ((d.checks || []).length) h += '<div class="ck">' + d.checks.filter((c) => c.check !== "schema" || !c.ok).map((c) => '<span class="' + (c.ok ? "ok" : "no") + '">' + (c.ok ? "✓ " : "✗ ") + esc(c.detail) + "</span>").join("") + "</div>";
+  if (d.older_than_target && d.applied && d.target_updated) h += '<div class="gonewhy">Already covered by the update on ' + esc(dayName(d.target_updated)) + "; nothing new here.</div>";
+  if (open && d.held_reason) h += '<div class="why">Waiting for you: ' + esc(d.held_reason) + ".</div>";
+  if (d.dropped) h += '<div class="gonewhy">' + esc(d.drop_reason || "Dropped.") + "</div>";
+  if (d.accepted_at) h += '<div class="gonewhy">' + (d.applied_directly ? "Accepted and saved to " + esc(friendly(d.accepted_to)) + "." : "Accepted. The next cycle files it in " + esc(friendly(d.accepted_to)) + ".") + "</div>";
+  if (d.dismissed_at && !d.dropped) h += '<div class="gonewhy">Dismissed.</div>';
+  if (o.actions && open) h += '<div class="qa">' + o.actions + "</div>";
+  h += '<details class="tech"><summary>Details</summary><pre>' + esc(["file: " + d.file, "type: " + d.type + (d.action ? " (" + d.action + ")" : ""),
+    "confidence: " + d.confidence, "evidence: " + ((d.evidence || []).join(", ") || "none"),
+    d.evidence_newest ? "newest evidence: " + d.evidence_newest : "", d.target_updated ? "file last updated: " + d.target_updated : "",
+    (d.refs || []).length ? "code: " + d.refs.map((r) => r.repo + "/" + r.path + (r.line ? ":" + r.line : "") + (r.symbol ? " " + r.symbol : "")).join(", ") : "",
+    d.validator ? "disprove check: " + d.validator.verdict + (d.validator.reason ? ", " + d.validator.reason : "") : "",
+    d.verifier ? "fresh check: " + d.verifier.verdict + (d.verifier.reason ? ", " + d.verifier.reason : "") : "",
+    !d.plain && d.summary ? "summary: " + d.summary : "", d.proposed && !d.action ? "proposed: " + d.proposed : ""].filter(Boolean).join("\n")) + "</pre></details>";
+  return h + "</div>";
+}
+function friendly(rel) {
+  rel = String(rel || "");
+  let m = rel.match(/^memory\/clients\/([^/]+)\/repos\/([^/]+)\.md$/); if (m) return "the " + m[2] + " context";
+  m = rel.match(/^memory\/clients\/([^/]+)\/context\.md$/); if (m) return "the " + m[1] + " client notes";
+  m = rel.match(/^memory\/inbox\/([^/]+)\/([^/]+)\.md$/); if (m) return "the " + m[2].replace(/^_/, "") + " inbox";
+  if (/^memory\/scratch\//.test(rel)) return "your scratch notes";
+  m = rel.match(/^memory\/(me|work)\/([^/]+)\.md$/); if (m) return "your notes on " + m[2].replace(/-/g, " ");
+  return rel.replace(/^memory\//, "");
+}
+function groupByDay(list, fallback) {
+  const out = []; let cur = null;
+  list.forEach((d) => { const k = d.evidence_newest || fallback || ""; if (!cur || cur.k !== k) { cur = { k: k, items: [] }; out.push(cur); } cur.items.push(d); });
+  return out;
+}
+
 /* ---------- Questions across cycles ---------- */
 async function viewQuestions(keep) {
   let Q;
   try { Q = (await api("/api/questions")).questions; } catch (e) { paint('<div class="banner bad">' + esc(e.message) + "</div>", keep); return; }
   if (S.tab !== "questions") return;
-  const dest = (to) => !to ? "" : /^memory\/scratch\//.test(to) ? "general memory" : /_client\.md$/.test(to) ? "client context" : ((to.match(/([^/]+)\.md$/) || [])[1] || to) + " context";
-  const rows = Q.map((d) => '<div class="dec held"><span class="badge b-review">' + esc(d.confidence) + "</span><strong>" + esc(d.type) + "</strong>" +
-    (d.scope === "general" && d.group !== "general" ? '<span class="badge b-running">general lesson</span>' : "") +
-    '<span class="f">' + esc(d.group + " · " + d.file) + '</span><span class="sm">' + esc(d.summary) + (d.proposed ? ": " + esc(d.proposed) : "") + "</span>" +
-    '<span class="ev">evidence: ' + (d.evidence_count ? d.evidence_count + " (" + esc(d.evidence.join(", ")) + ")" : "none") + (d.evidence_newest ? " · newest evidence " + esc(d.evidence_newest) : "") +
-    " · from " + esc(fmtTime(d.created_at)) + " · expires in " + d.expires_in_days + " day" + (d.expires_in_days === 1 ? "" : "s") + "</span>" +
-    '<div class="qa"><button class="btn primary" type="button" data-qa="accept" data-id="' + esc(d.cycle) + '" data-i="' + d.index + '">Accept → ' + esc(dest(d.accept_to)) + "</button>" +
+  const rows = Q.map((d) => decCard(d, { actions:
+    '<button class="btn primary" type="button" data-qa="accept" data-id="' + esc(d.cycle) + '" data-i="' + d.index + '">Accept → ' + esc(d.accept_where || friendly(d.accept_to)) + "</button>" +
     '<button class="btn" type="button" data-qa="dismiss" data-id="' + esc(d.cycle) + '" data-i="' + d.index + '">Dismiss</button>' +
-    '<button class="btn link" type="button" data-qa="open" data-id="' + esc(d.cycle) + '">Open its cycle</button></div></div>').join("");
-  paint(summaryBanner() + '<div class="row between"><div><h1>Questions' + hq("questions_tab") + '</h1><p class="sub" style="margin-top:6px">Changes Claude was not sure about. Nothing here is saved until you accept it.</p></div></div>' +
+    '<button class="btn link" type="button" data-qa="open" data-id="' + esc(d.cycle) + '">Open its cycle</button>' +
+    '<span class="sub" style="align-self:center">from ' + esc(fmtTime(d.created_at)) + " · expires in " + d.expires_in_days + " day" + (d.expires_in_days === 1 ? "" : "s") + "</span>" })).join("");
+  paint(summaryBanner() + '<div class="row between"><div><h1>Questions' + hq("questions_tab") + '</h1><p class="sub" style="margin-top:6px">Changes Somna was not sure about, or that belong somewhere only you can decide. Nothing here is saved until you accept it.</p></div></div>' +
     (rows ? '<div class="decs">' + rows + "</div>" : '<div class="glass card"><p class="sub">No open questions. Nothing needs you right now.</p></div>'), keep);
   document.querySelectorAll("[data-qa]").forEach((b) => b.onclick = (e) => {
     if (b.dataset.qa === "open") return goReview(b.dataset.id);
@@ -597,7 +681,7 @@ function viewReview(keep) {
     (s.type === "map" ? tile("Repo", (s.repo || {}).name || "", (s.repo || {}).client || "") : tile("Sessions read", s.sessions, Object.keys(repos).length + " repo" + (Object.keys(repos).length === 1 ? "" : "s") + (s.selected_sessions ? " · chosen by you" : ""))) +
     tile("Changes", s.diffstat && s.diffstat !== "no changes" ? s.diffstat.split(",")[0] : "None", s.diffstat || s.note || "") +
     tile("Cost", cost, (r.usage && r.usage.num_turns ? r.usage.num_turns + " turns" : "from Claude Code") + (ktok ? " · " + ktok + " tokens" : "")) +
-    (s.decision_counts ? tile("Confidence", s.decision_counts.high + " high", s.decision_counts.medium + " medium · " + s.decision_counts.low + " low" + (s.decision_counts.held ? " · " + s.decision_counts.held + " held" : "") + (s.decision_counts.dropped ? " · " + s.decision_counts.dropped + " dropped as outdated" : "")) : "") +
+    (s.decision_counts ? tile("Confidence", s.decision_counts.high + " high", s.decision_counts.medium + " medium · " + s.decision_counts.low + " low" + (s.decision_counts.held ? " · " + s.decision_counts.held + " held" : "") + (s.decision_counts.dropped ? " · " + s.decision_counts.dropped + " dropped" : "")) : "") +
     (s.type === "map" || s.decision === "dry_run" || s.decision === "nothing_to_do" ? "" : tile("Model", String(s.model || "default").replace("claude-code-default", "Claude Code default"), s.instructions ? "with instructions" : "no instructions")) +
     (s.needs_review ? tile("Memory since start", changed.length || dirty.length ? "Changed" : "Unchanged",
       changed.length ? changed.join(", ") : dirty.length ? "unsaved: " + dirty.join(", ") : "safe to adopt") : "") + "</div>";
@@ -632,34 +716,40 @@ function viewReview(keep) {
         (x.truncated ? '<span class="badge b-review">' + esc(x.read_pct + "%, shortened") + "</span>" : '<span class="badge b-adopted">all</span>') +
         (x.already_read_until ? ' <span class="badge b-muted">earlier part already read</span>' : "") + "</td><td>" + (x.subagents || 0) + "</td></tr>").join("") + "</tbody></table></div></details>";
   }
+  const actv = r.activity || {};
+  if (Object.keys(actv).length) {
+    h += '<section class="glass card"><h2>What you did' + hq("did") + '</h2>' + Object.keys(actv).sort((a, b) => (a === "general") - (b === "general") || a.localeCompare(b)).map((g) => {
+      const A = actv[g], run = (r.runs || []).find((x) => x.group === g) || {};
+      const nm = g === "general" ? "Outside client repos" : String(A.title || g).replace(/^Client: /, "");
+      const ss = (A.sessions || []).map((x) => '<div class="s"><b>' + esc(dayName(x.first)) + ", " + esc(String(x.first || "").slice(11, 16)) + "</b> · " + esc(x.repo || "") +
+        (x.first_message ? " · <q>" + esc(x.first_message) + "</q>" : "") + (x.files_changed && x.files_changed.length ? " <small>· " + x.files_changed.length + " file" + (x.files_changed.length === 1 ? "" : "s") + " changed</small>" : "") + "</div>").join("");
+      const cs = Object.keys(A.commits || {}).map((k) => '<div class="s"><small>' + esc(k) + ": " + A.commits[k].length + " commit" + (A.commits[k].length === 1 ? "" : "s") + " · latest <q>" + esc(A.commits[k][0].subject) + "</q></small></div>").join("");
+      const st = {}; (run.stages || []).forEach((x) => st[x.stage] = x);
+      const pipe = run.stages ? '<div class="pipe">' + [
+        st.recon && "<span>Read your work</span>",
+        st.hunt && "<span>Looked for " + (st.hunt.small_night ? "all kinds of change" : (st.hunt.classes || []).length + " kinds of change") + (st.hunt.findings != null ? ": " + st.hunt.findings + " found" : "") + "</span>",
+        st.check && "<span>Checked quotes and code: " + st.check.passed + " passed" + (st.check.rejected ? ", " + st.check.rejected + " dropped" : "") + "</span>",
+        st.validate && "<span>Tried to disprove: " + (st.validate.upheld || 0) + " held up" + (st.validate.refuted ? ", " + st.validate.refuted + " disproved" : "") + "</span>",
+        st.verify && "<span>Fresh check: " + (st.verify.confirmed || 0) + " confirmed" + (st.verify.rejected ? ", " + st.verify.rejected + " rejected" : "") + "</span>",
+        st.apply && "<span>Saved " + st.apply.saved + " · asked " + st.apply.questions + " · dropped " + st.apply.dropped + "</span>"].filter(Boolean).join("<i>→</i>") + "</div>" : "";
+      return '<div class="did"><strong>' + esc(nm) + "</strong>" + ss + cs + pipe + "</div>";
+    }).join("") + "</section>";
+  }
   const allDecs = (r.decisions || []).map((d, i) => Object.assign({ i: i }, d));
   const decs = allDecs.filter((d) => !d.dropped), dropped = allDecs.filter((d) => d.dropped);
-  const dest = (to) => !to ? "" : /^memory\/scratch\//.test(to) ? "general memory" : /_client\.md$/.test(to) ? "client context" : ((to.match(/([^/]+)\.md$/) || [])[1] || to) + " context";
-  const dline = (d) => (d.evidence_newest ? " · newest evidence " + d.evidence_newest : "") + (d.target_updated ? " · file updated " + d.target_updated : "");
   if (decs.length) {
-    const rank = (d) => (!d.applied && !d.accepted_at && !d.dismissed_at) ? 0 : d.synthetic ? 1 : d.rule_broken ? 2 : !d.applied ? 6 : ({ low: 3, medium: 4, high: 5 })[d.confidence];
-    decs.sort((a, b) => rank(a) - rank(b));
-    const open = decs.filter((d) => rank(d) === 0).length;
-    const cb = { high: "b-adopted", medium: "b-running", low: "b-review" };
-    if (open) h += '<div class="banner warn"><strong>' + open + " low-confidence change" + (open === 1 ? " was" : "s were") + " held back.</strong> Accept the ones that are right and the next cycle applies them, or dismiss them.</div>";
-    h += '<section class="glass card"><div class="row between"><h2>Decisions' + hq("decisions") + '</h2><span class="sub">held and low confidence first</span></div><div class="decs">' + decs.map((d) => {
-      const held = !d.applied, ans = d.accepted_at ? "accepted, queued in " + d.accepted_to : d.dismissed_at ? "dismissed" : "";
-      const cls = held && !ans ? " held" : (d.synthetic || d.rule_broken) ? " bad" : "";
-      return '<div class="dec' + cls + '"><span class="badge ' + (cb[d.confidence] || "b-muted") + '">' + esc(d.confidence) + "</span><strong>" + esc(d.synthetic ? "no decision recorded" : d.type) + "</strong>" +
-        (held ? '<span class="badge b-muted">' + esc(ans || "held, not in the proposal") + "</span>" : "") +
-        (d.rule_broken ? '<span class="badge b-failed">applied although low confidence</span>' : "") +
-        (d.older_than_target && d.applied ? '<span class="badge b-failed">evidence older than the current context</span>' : "") +
-        (d.scope === "general" && d.group !== "general" ? '<span class="badge b-running">general lesson</span>' : "") +
-        '<span class="f">' + esc(d.group + " · " + d.file) + '</span><span class="sm">' + esc(d.summary) + (d.proposed && held ? ": " + esc(d.proposed) : "") + "</span>" +
-        '<span class="ev">evidence: ' + (d.evidence_count ? d.evidence_count + " (" + esc(d.evidence.join(", ")) + ")" : "none") + esc(dline(d)) + "</span>" +
-        (held && !ans && s.needs_review !== undefined ? '<div class="qa"><button class="btn primary" type="button" data-dec="accept" data-i="' + d.i + '">Accept → ' + esc(dest(d.accept_to)) + "</button>" + '<button class="btn" type="button" data-dec="dismiss" data-i="' + d.i + '">Dismiss</button></div>' : "") + "</div>";
-    }).join("") + "</div></section>";
+    const openQ = decs.filter((d) => !d.applied && !d.accepted_at && !d.dismissed_at);
+    const rest = decs.filter((d) => openQ.indexOf(d) < 0).sort((a, b) => String(b.evidence_newest || "").localeCompare(String(a.evidence_newest || "")) || (a.synthetic ? -1 : 0));
+    const acts = (d) => s.needs_review !== undefined ? '<button class="btn primary" type="button" data-dec="accept" data-i="' + d.i + '">Accept → ' + esc(d.accept_where || friendly(d.accept_to)) + "</button>" +
+      '<button class="btn" type="button" data-dec="dismiss" data-i="' + d.i + '">Dismiss</button>' : "";
+    if (openQ.length) h += '<section class="glass card"><h2>Waiting for you' + hq("questions_tab") + '</h2><p class="sub" style="margin:4px 0 0">Not saved. Accept the ones that are right.</p><div class="decs">' +
+      openQ.map((d) => decCard(d, { actions: acts(d) })).join("") + "</div></section>";
+    if (rest.length) h += '<section class="glass card"><div class="row between"><h2>What changed' + hq("decisions") + '</h2><span class="sub">newest first, by the day of its evidence</span></div>' +
+      groupByDay(rest.map((d) => d.evidence_newest ? d : Object.assign({}, d, { evidence_newest: String(r.created_at || "").slice(0, 10) })).sort((a, b) => String(b.evidence_newest).localeCompare(String(a.evidence_newest)))).map((grp) => (grp.k ? '<div class="dayh">' + esc(dayName(grp.k)) + "</div>" : '<div class="dayh">No date</div>') + '<div class="decs">' + grp.items.map((d) => decCard(d)).join("") + "</div>").join("") + "</section>";
   }
   if (dropped.length) {
-    h += '<details class="glass card"><summary><strong>Dropped as outdated</strong>' + hq("dropped") + ' <span class="sub">' + dropped.length + " held change" + (dropped.length === 1 ? "" : "s") +
-      " with evidence older than the current context, so they were not shown as questions</span></summary><div class=\"decs\">" +
-      dropped.map((d) => '<div class="dec"><span class="badge b-muted">' + esc(d.confidence) + "</span><strong>" + esc(d.type) + '</strong><span class="f">' + esc(d.group + " · " + d.file) + '</span><span class="sm">' + esc(d.summary) +
-        '</span><span class="ev">' + esc(d.drop_reason || "") + "</span></div>").join("") + "</div></details>";
+    h += '<details class="glass card"><summary><strong>Checked and dropped</strong>' + hq("dropped") + ' <span class="sub">' + dropped.length + " finding" + (dropped.length === 1 ? "" : "s") +
+      " that did not pass a check, with the reason</span></summary><div class=\"decs\">" + dropped.map((d) => decCard(d)).join("") + "</div></details>";
   }
   if (r.status === "completed" || r.status === "failed") {
     h += '<div class="cols"><section class="glass card md"><h2 style="margin-bottom:8px">Report</h2>' + md(D.report) + "</section>" +
@@ -1064,6 +1154,12 @@ async function viewSettings(keep) {
     ' <button class="btn link" type="button" id="mRefresh">Refresh list</button></p><div class="set">' +
     '<label class="k" for="f_model">Nightly and manual cycles' + hq("model") + '</label><div class="v">' + modelPick("f_model", set.model) + "</div>" +
     '<label class="k" for="f_map_model">Map' + hq("map_model") + '</label><div class="v">' + modelPick("f_map_model", set.map_model) + "</div></div></section>";
+  h += '<section class="glass card"><h2 style="margin-bottom:6px">How changes are checked' + hq("pipeline") + '</h2><p class="sub" style="margin-bottom:12px">The full pipeline reads your work, looks for each kind of change separately, checks every quote and code reference, tries to disprove each finding and has a fresh agent confirm it before anything is saved.</p><div class="set">' +
+    '<label class="k" for="f_pipeline">Pipeline</label><div class="v"><select id="f_pipeline" data-key="pipeline"><option value="staged"' + (set.pipeline !== "single" ? " selected" : "") + '>Full: find, check, disprove, confirm</option><option value="single"' + (set.pipeline === "single" ? " selected" : "") + ">One pass: cheaper, no independent checks</option></select></div>" +
+    '<label class="k" for="f_hunt_model">Model for finding changes' + hq("hunt_model") + '</label><div class="v">' + modelPick("f_hunt_model", set.hunt_model) + "</div>" +
+    '<label class="k" for="f_check_model">Model for the checks' + hq("check_model") + '</label><div class="v">' + modelPick("f_check_model", set.check_model) + "</div>" +
+    numRow("small_night_kb", "Light night below", "KB of sessions: one combined search and no disprove step when there are 1 or 2 small sessions") +
+    numRow("max_engines", "Claude runs at the same time", "runs") + "</div></section>";
   h += '<section class="glass card"><h2 style="margin-bottom:12px">Limits and cost</h2><div class="set">' +
     numRow("max_budget_usd", "Spend cap per run", "US$ · empty = no cap", "no cap") + numRow("map_max_budget_usd", "Spend cap per map", "US$ · empty = no cap", "no cap") +
     numRow("max_turns", "Turn limit per run", "turns · empty = no limit", "no limit") + numRow("timeout_minutes", "Time limit per run", "minutes") +
@@ -1097,7 +1193,7 @@ async function viewSettings(keep) {
   $("#setSave").onclick = (e) => busy(e.currentTarget, async () => {
     const settings = {};
     document.querySelectorAll("#main [data-key]").forEach((el) => { settings[el.dataset.key] = el.type === "checkbox" ? el.checked : (el.value === "" ? null : (el.type === "number" ? Number(el.value) : el.value)); });
-    settings.model = $("#f_model").value === "__custom" ? "" : $("#f_model").value; settings.map_model = $("#f_map_model").value === "__custom" ? "" : $("#f_map_model").value;
+    settings.model = $("#f_model").value === "__custom" ? "" : $("#f_model").value; settings.map_model = $("#f_map_model").value === "__custom" ? "" : $("#f_map_model").value; settings.hunt_model = $("#f_hunt_model").value === "__custom" ? "" : $("#f_hunt_model").value; settings.check_model = $("#f_check_model").value === "__custom" ? "" : $("#f_check_model").value;
     const schedule = { nightly: { enabled: $("#nOn").checked, time: $("#nTime").value, days: Array.from(document.querySelectorAll("[data-nday]")).filter((c) => c.checked).map((c) => +c.dataset.nday) },
       weekly: { enabled: $("#wOn").checked, day: +$("#wDay").value, time: $("#wTime").value, since_days: +$("#wDays").value, model: $("#wModel").value === "__custom" ? "" : $("#wModel").value, instructions: $("#wInstr").value } };
     try { const j = await api("/api/settings", { settings: settings, schedule: schedule }); toast(j.message); S.settingsDirty = false; await loadSettings(); S.setup = null; await loadSetup(); renderHeader(); viewSettings(true); $("#setState").textContent = "Saved."; }

@@ -45,7 +45,7 @@ import traceback
 import webbrowser
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 SCRIPT = Path(__file__).resolve()
 HOME = Path(os.environ.get("SOMNA_HOME", str(Path.home() / "somna"))).expanduser()
 MEM = HOME / "memory"
@@ -214,6 +214,8 @@ DEFAULT_CFG = {
     "exclude_project_patterns": ["somna-worktrees"], "notify": True, "ui_port": 4747,
     "auto_close_empty": True, "per_client_runs": True, "context_max_chars": 7000, "remap_after_commits": 40,
     "log_level": "info", "stream_events": True, "parallel_runs": 3, "hold_low_confidence": True, "max_turns": None,
+    "pipeline": "staged", "hunters": ["stale", "new", "corrections", "tidy"], "hunt_model": "", "check_model": "",
+    "small_night_kb": 40, "max_engines": 4,
     "schedule": {
         "nightly": {"enabled": True, "time": "02:00", "days": [0, 1, 2, 3, 4, 5, 6]},
         "weekly": {"enabled": False, "day": 6, "time": "03:00", "model": "", "since_days": 7,
@@ -1099,13 +1101,25 @@ def allocate_budget(sizes, budget, cap):
     return out
 
 
+def first_user_message(parsed, limit=200):
+    """The owner's first words in a session: the best one-line reminder of what the session was about."""
+    for sec in parsed.get("sections") or []:
+        for it in sec["items"]:
+            if it["kind"] == "msg" and it["role"] == "user" and not it["side"]:
+                txt = re.sub(r"\s+", " ", re.sub(r"<[^>]{1,80}>", " ", it["text"] or "")).strip()
+                if txt and not txt.startswith("[Request interrupted"):
+                    return txt[:limit] + ("…" if len(txt) > limit else "")
+    return ""
+
+
 def session_meta(parsed, root):
     full = session_size(parsed)
     return {"id": parsed["id"], "project": parsed["cwd"], "repo_root": root,
             "repo": Path(root).name if root else (Path(parsed["cwd"]).name if parsed["cwd"] else parsed["path"].parent.name),
             "started": parsed["first_ts"], "messages": parsed["messages"], "format": parsed["format"], "truncated": False,
             "subagents": parsed["subagents"], "first_activity": parsed["first_ts"], "last_activity": parsed.get("last_ts"),
-            "already_read_until": parsed.get("read_until"), "size_bytes": full, "size_kb": round(full / 1024, 1), "est_tokens": int(full / 4), "read_pct": 100}
+            "already_read_until": parsed.get("read_until"), "size_bytes": full, "size_kb": round(full / 1024, 1), "est_tokens": int(full / 4), "read_pct": 100,
+            "first_message": first_user_message(parsed)}
 
 
 def digest_session(path, cap_kb):
@@ -1235,7 +1249,7 @@ def _kill_group(proc):
             continue
 
 
-def _run_engine(cmd, cwd, timeout_s, logfile, label, ddir=None, group=None, roots=()):
+def _run_engine(cmd, cwd, timeout_s, logfile, label, ddir=None, group=None, roots=(), usage_key=None):
     """Run Claude Code, stream its events into the run folder, honour cancel and timeout.
     Errors carry typed reasons: timeout, internal_error (and canceled)."""
     safe = [c if i != 2 else "<prompt {} chars>".format(len(c)) for i, c in enumerate(cmd)]
@@ -1266,12 +1280,13 @@ def _run_engine(cmd, cwd, timeout_s, logfile, label, ddir=None, group=None, root
             cur = {}
         finally:
             _file_lock.release()
-        cur[group or label] = {"tokens": tok, "turns": len(state["msgs"]), "tools": state["tools"],
+        ukey = usage_key or group or label
+        cur[ukey] = {"tokens": tok, "turns": len(state["msgs"]), "tools": state["tools"],
                                "memory_reads": state["mem"]["read"], "memory_writes": state["mem"]["write"],
                                "updated_at": iso(utcnow()), "final": final}
         with _file_lock:
             try:
-                cur.update({k: v for k, v in json.loads(usage_path.read_text()).items() if k != (group or label)})
+                cur.update({k: v for k, v in json.loads(usage_path.read_text()).items() if k != ukey})
             except (OSError, ValueError):
                 pass
             tmp = usage_path.with_name("usage.{}.tmp".format(threading.get_ident()))
@@ -1395,7 +1410,7 @@ DECISIONS_SECTION = """
 ## Decisions file
 Also write {{DECISIONS_PATH}} as JSON, one entry per change you made and one per change you held back:
 {"decisions": [{"file": "memory/...", "type": "verified|merged|replaced|reorganized|insight|new",
-  "summary": "one line", "confidence": "high|medium|low", "evidence": ["session ids or commits"],
+  "summary": "one plain sentence for the owner: what changes and why, no ids or file paths", "confidence": "high|medium|low", "evidence": ["session ids or commits"],
   "evidence_dates": ["YYYY-MM-DD of each piece of evidence"], "scope": "client or general",
   "applied": true, "proposed": "for a held change: the exact line or edit you would make"}]}
 "scope": "general" marks a client-neutral lesson that belongs in general memory (me/, work/). Write it without any
@@ -1449,6 +1464,28 @@ def _scope_files(wt, group, reg):
 
 def _build_prompt(template, wt, ddir, group, group_title, metas, reg, since, steering, report, instructions=None,
                   decisions=None, hold=True, cfg=None):
+    subs = _prompt_subs(wt, ddir, group, group_title, metas, reg, since, steering, report, instructions, decisions, hold, cfg)
+    if "{{DECISIONS_PATH}}" not in template:
+        template += DECISIONS_SECTION
+    if "{{SESSION_TABLE}}" not in template:
+        template += TIME_SECTION
+    if "{{TRIMMED}}" not in template:
+        template += ("\n## Shortened sessions\nThese sessions were shortened to fit the reading budget. Open the full text only "
+                     "when the short version mentions something you need the detail of:\n{{TRIMMED}}\n")
+    if instructions and "{{INSTRUCTIONS}}" not in template:
+        template += ("\n\n## Instructions for this cycle\nFrom the owner, for this run only. Use them to decide what to focus on, "
+                     "what to preserve and how to write.\n<instructions>\n{}\n</instructions>\n".format(instructions))
+    return _fill(template, subs)
+
+
+def _fill(template, subs):
+    for k, v in subs.items():
+        template = template.replace(k, v)
+    return template
+
+
+def _prompt_subs(wt, ddir, group, group_title, metas, reg, since, steering, report, instructions=None,
+                 decisions=None, hold=True, cfg=None):
     rel_sessions = ddir / "sessions" / group
     scope_allowed, scope_denied = _group_scope(group)
     repo_lines, activity = [], []
@@ -1490,23 +1527,11 @@ def _build_prompt(template, wt, ddir, group, group_title, metas, reg, since, ste
                 for i, m in enumerate(sorted(metas, key=lambda m_: m_.get("last_activity") or m_.get("first_activity") or ""))) or "(none)",
             "{{CONTEXT_DATES}}": "\n".join("- {}: {} (UTC)".format(k, _uday(v)) for k, v in _file_dates(wt, _scope_files(wt, group, reg)).items())
                                  or "- (no files yet)"}
-    if "{{DECISIONS_PATH}}" not in template:
-        template += DECISIONS_SECTION
-    if "{{SESSION_TABLE}}" not in template:
-        template += TIME_SECTION
-    if "{{TRIMMED}}" not in template:
-        template += ("\n## Shortened sessions\nThese sessions were shortened to fit the reading budget. Open the full text only "
-                     "when the short version mentions something you need the detail of:\n{{TRIMMED}}\n")
-    if instructions and "{{INSTRUCTIONS}}" not in template:
-        template += ("\n\n## Instructions for this cycle\nFrom the owner, for this run only. Use them to decide what to focus on, "
-                     "what to preserve and how to write.\n<instructions>\n{}\n</instructions>\n".format(instructions))
-    for k, v in subs.items():
-        template = template.replace(k, v)
-    return template
+    return subs
 
 
 CONF = ("high", "medium", "low")
-DTYPES = ("verified", "merged", "replaced", "reorganized", "insight", "new")
+DTYPES = ("verified", "merged", "replaced", "reorganized", "insight", "new", "corrected", "removed")
 
 
 def _day(x):
@@ -1617,6 +1642,10 @@ def read_decisions(path, group, changed, hold, dating=None):
                 item["drop_reason"] = ("its sessions were already curated by an adopted cycle and its newest evidence {} is older "
                                        "than the file's last update {}").format(max([x["day"] for x in info["sessions"]] + info["commits"]), tgt)
         item["accept_to"] = _held_target(group, item["file"], item["scope"])
+        mv = re.search(r"memory/inbox/([a-z0-9][a-z0-9_.-]*)/([A-Za-z0-9_.-]+\.md)", item["proposed"] + " " + item["summary"])
+        if mv and item["accept_to"] == "memory/scratch/notes.md" and "<" not in mv.group(0):
+            # a held "move this line to a client's inbox": accepting it writes there directly instead of looping in scratch
+            item["accept_to"] = mv.group(0)
         out.append(item)
     explained = {d["file"] for d in out if d["applied"]}
     for f in changed:
@@ -1651,12 +1680,39 @@ def decision_counts(decs):
 def _held_target(group, file_, scope=None):
     """Where an accepted held change goes so the next cycle applies it: the repo inbox, the client inbox,
     or general notes (scratch) for client-neutral lessons, which the general run files into me/ or work/."""
+    f = file_ or ""
+    m = re.match(r"^memory/clients/([^/]+)/repos/([^/]+)\.md$", f)
+    if m:
+        return inbox_rel(m.group(1), m.group(2))
+    m = re.match(r"^memory/clients/([^/]+)/", f)
+    if m:
+        return "memory/inbox/{}/_client.md".format(m.group(1))
+    if re.match(r"^memory/inbox/[^/]+/[^/]+\.md$", f):
+        # an inbox line goes straight to that inbox, even from a general run, so it is never parked in scratch again
+        return f
     if group == GENERAL or scope == "general":
         return "memory/scratch/notes.md"
-    m = re.match(r"^memory/clients/([^/]+)/repos/([^/]+)\.md$", file_ or "")
-    if m and m.group(1) == group:
-        return inbox_rel(group, m.group(2))
     return "memory/inbox/{}/_client.md".format(group)
+
+
+def friendly_file(rel):
+    """memory/clients/acme/repos/shop.md -> "the shop context"; plain words for people."""
+    rel = rel or ""
+    m = re.match(r"^memory/clients/([^/]+)/repos/([^/]+)\.md$", rel)
+    if m:
+        return "the {} context".format(m.group(2))
+    m = re.match(r"^memory/clients/([^/]+)/context\.md$", rel)
+    if m:
+        return "the {} client notes".format(m.group(1))
+    m = re.match(r"^memory/inbox/([^/]+)/([^/]+)\.md$", rel)
+    if m:
+        return "the {} inbox".format(m.group(2).lstrip("_"))
+    if rel.startswith("memory/scratch/"):
+        return "your scratch notes"
+    m = re.match(r"^memory/(me|work)/([^/]+)\.md$", rel)
+    if m:
+        return "your notes on {}".format(m.group(2).replace("-", " "))
+    return rel.replace("memory/", "", 1)
 
 
 def do_decide_held(did, index, accept):
@@ -1674,7 +1730,22 @@ def do_decide_held(did, index, accept):
         save_rec(rec)
         log("info", "decision.dismissed", "held change dismissed", cycle=did, file=d["file"])
         return "Dismissed. It will not be applied."
+    if d.get("staged") and d.get("action") in FINDING_ACTIONS:
+        waiting = [r["id"] for r in all_recs() if needs_review(r)]
+        if not running_pid() and not waiting and not dirty_paths("memory"):
+            fnd = {"file": d["file"], "action": d["action"], "section": d.get("section") or "",
+                   "target_text": d.get("target_text") or "", "new_text": d.get("new_text") or ""}
+            if apply_finding(HOME, fnd, d.get("evidence_newest")):
+                git("add", "--", d["file"])
+                git("commit", "-m", "accepted: {}".format((d.get("plain") or d["summary"])[:120]), "--", d["file"])
+                d["accepted_at"], d["accepted_to"], d["applied_directly"] = iso(utcnow()), d["file"], True
+                save_rec(rec)
+                log("info", "decision.accepted", "question accepted and saved to memory", cycle=did, file=d["file"])
+                return "Saved to {}. New sessions use it.".format(friendly_file(d["file"]))
+        # memory is busy (a run, a waiting proposal or unsaved edits) or the text moved on: queue it for the next cycle
     rel = d.get("accept_to") or _held_target(d["group"], d["file"], d.get("scope"))
+    if d.get("staged"):
+        rel = _held_target(d["group"], d["file"], d.get("scope"))
     f = HOME / rel
     f.parent.mkdir(parents=True, exist_ok=True)
     if not f.exists():
@@ -1727,6 +1798,776 @@ def do_create(since_hours=None, since_last=False, dry_run=False, out=print, inst
         except Exception as e:
             log("error", "adopt.auto_crashed", repr(e), traceback=traceback.format_exc()[-1500:])
     return rec
+
+
+# ---------------- staged pipeline: recon, hunt, validate, check, verify, apply ----------------
+# A cycle in stages, each with one job, so nothing grades its own work:
+#   recon     code writes an activity brief: what the owner did, per session and commit (no Claude call)
+#   hunt      read-only agents, one per class of change, report findings as JSON (they never edit)
+#   validate  a read-only agent tries to disprove every finding
+#   check     code checks the schema, every quote against its source, and every path, line and symbol
+#   verify    a fresh agent that never saw the reasoning re-checks what is left against the raw sources
+#   apply     code applies the surviving findings; doubtful ones become questions, the rest are dropped with a reason
+
+HUNT_CLASSES = {
+    "stale": ("Stale or contradicted facts",
+              "Find lines in memory that are no longer true: contradicted by a newer session or commit, describing work "
+              "that has since finished or changed, or \"Current state\" items older than {{STALE_DAYS}} days that nothing "
+              "newer confirms. Propose replace (with the corrected line) or remove."),
+    "new": ("New facts worth keeping",
+            "Find durable new facts the next session in this scope should know: decisions, how things work, gotchas, "
+            "changes in current state, lessons that repeat. Propose add, in the right file and section. Skip one-off "
+            "chatter and anything memory already says."),
+    "corrections": ("Corrections and preferences",
+                    "Find where the owner corrected an agent or stated a rule (\"always\", \"never\", \"from now on\", "
+                    "\"don't\"), and every CORRECTION: or [owner accepted] line in the inboxes and scratch notes. These "
+                    "carry the most weight. Propose them as add or replace, and a remove for each inbox line you filed."),
+    "tidy": ("Tidy up",
+             "Merge each inbox and scratch line into the file it belongs to (an add there plus a remove of the inbox "
+             "line), remove duplicate lines, and move lines that sit in the wrong file (a remove plus an add)."),
+}
+HUNT_CLASSES["all"] = ("All kinds of change",
+                       "Do all four jobs: " + " ".join("({}) {}".format(i + 1, HUNT_CLASSES[k][1]) for i, k in
+                                                         enumerate(("stale", "new", "corrections", "tidy"))))
+FINDING_ACTIONS = ("add", "replace", "remove")
+SOURCE_RE = re.compile(r"^(session|commit|memory|repo):(.+)$")
+CORRECTION_RE = re.compile(r"\b(no,|don'?t|do not|never|always|from now on|instead|that'?s wrong|not correct|actually|stop)\b", re.I)
+_engine_slots = {"sem": None, "n": 0}
+
+DEFAULT_HUNT_PROMPT = """HUNT {{CLASS}}
+You are one of several hunters in a Somna cycle, an offline job that keeps the owner's agent memory correct between
+work sessions. Your class: {{CLASS_TITLE}}.
+{{CLASS_TASK}}
+
+You only READ. Do not edit any file. Report findings as JSON in your final message. Another agent will try to disprove
+every finding, and code will check every quote, path and line number, so report only what exact text backs up.
+
+This run covers ONE scope: {{GROUP_TITLE}} (group id: {{GROUP}}). Today is {{TODAY}}. Times are UTC.
+
+## Inputs
+- Memory (read it first, to know what is already there): {{OUTPUT_MEMORY_DIR}}
+- What the owner did, per session and commit (read this before the sessions): {{ACTIVITY_PATH}}
+- Session digests, one file per session: {{SESSIONS_DIR}}
+- Shortened sessions and where their full text is:
+{{TRIMMED}}
+- Sessions, oldest first:
+{{SESSION_TABLE}}
+- Repos in this scope and their files:
+{{REPOS}}
+- Git activity since {{SINCE}}:
+{{GIT_ACTIVITY}}
+- Last update of the files in this scope:
+{{CONTEXT_DATES}}
+- Steering from the owner (standing rules), which overrides your own judgement:
+<steering>
+{{STEERING}}
+</steering>
+- Instructions for THIS cycle from the owner:
+<instructions>
+{{INSTRUCTIONS}}
+</instructions>
+
+## Scope
+{{SCOPE}}
+If something belongs somewhere else (another client, or general notes), still report it, with "file" set to where it
+belongs. The owner decides those.
+
+## Rules
+- Newer evidence wins. Never replace a line with something from an older session or commit.
+- Lines in repo and client context files end with "(as of YYYY-MM-DD)", the date of their newest evidence.
+- Do not report what memory already says. No secrets, keys, personal data or facts that only hold for one day.
+- Confidence: high = two independent sources, or the owner said it directly; medium = one clear source;
+  low = inferred, weak, or sources disagree.
+
+## Output
+Your final message is ONLY this JSON object, no other text:
+{"findings": [{"id": "f1", "action": "add|replace|remove", "file": "memory/...", "section": "## Heading",
+  "target_text": "...", "new_text": "...", "summary": "...",
+  "evidence": [{"source": "session:<id>", "quote": "...", "line": 0}],
+  "refs": [{"repo": "<repo name>", "path": "<path in the repo>", "line": 0, "symbol": "<name>"}],
+  "confidence": "high|medium|low"}]}
+- action: add = new line(s) under a section; replace = target_text becomes new_text; remove = target_text goes.
+- file: a path inside memory, like memory/clients/acme/repos/shop.md
+- section: for add, the exact "## " heading to add under (created if missing). target_text: for replace and remove,
+  whole lines copied EXACTLY from the file. new_text: for add and replace, in the style of the file.
+- summary: one plain sentence for the owner, what changes and why. No ids, no file paths, no jargon.
+  Example: "Checkout v2 is on staging now, so the line saying it has not started is replaced."
+- evidence: 1 to 5 items. source is one of session:<session id>, commit:<repo name>@<sha>, memory:<path>,
+  repo:<repo name>/<path in the repo>. quote is text copied EXACTLY from that source, one line, under 300 characters.
+  line is optional, for memory: and repo: sources.
+- refs: the code the finding names (files, functions), or an empty list.
+Return {"findings": []} when there is nothing to report.
+"""
+
+DEFAULT_VALIDATE_PROMPT = """VALIDATE
+You check findings that other agents made in a Somna cycle for {{GROUP_TITLE}}. Your job is to DISPROVE them.
+Read the sources yourself. For each finding look for: a newer session or commit that says otherwise, a quote that does
+not say what the summary claims, a change memory already has, a fact that only held for one day, a fact from another
+client, or a secret. Uphold a finding only when you could not break it.
+
+- Findings to check: {{FINDINGS_PATH}}
+- Memory: {{OUTPUT_MEMORY_DIR}}
+- What the owner did: {{ACTIVITY_PATH}}
+- Session digests: {{SESSIONS_DIR}}
+- Sessions, oldest first:
+{{SESSION_TABLE}}
+- Repos:
+{{REPOS}}
+Today is {{TODAY}}. Times are UTC. You only read; do not edit any file.
+
+Your final message is ONLY this JSON object:
+{"verdicts": [{"id": "f1", "verdict": "upheld|refuted|unsure", "reason": "one plain sentence",
+  "quote": "exact text from a source that backs your verdict", "source": "session:<id> | commit:<repo>@<sha> | memory:<path> | repo:<repo>/<path>"}]}
+Every finding gets exactly one verdict.
+"""
+
+DEFAULT_VERIFY_PROMPT = """VERIFY
+You are an independent reviewer for a Somna cycle ({{GROUP_TITLE}}). You have not seen how these changes were found or
+argued. For each proposed change to the owner's memory, read memory and the listed sources yourself and decide whether a
+careful person would make exactly this change today. Confirm only when the sources clearly support it and nothing newer
+contradicts it.
+
+- Proposed changes: {{CHANGES_PATH}}
+- Memory: {{OUTPUT_MEMORY_DIR}}
+- Session digests: {{SESSIONS_DIR}}
+- Repos:
+{{REPOS}}
+Today is {{TODAY}}. You only read; do not edit any file.
+
+Your final message is ONLY this JSON object:
+{"checks": [{"id": "f1", "verdict": "confirm|reject|unsure", "reason": "one plain sentence"}]}
+Every change gets exactly one verdict.
+"""
+
+
+def _norm(s):
+    return re.sub(r"\s+", " ", str(s or "").replace("’", "'").replace("‘", "'")
+                  .replace("“", '"').replace("”", '"')).strip()
+
+
+def _contains(hay, needle):
+    n = _norm(needle)
+    if not n:
+        return False
+    h = _norm(hay)
+    return n in h or n.lower() in h.lower()
+
+
+def parse_json_reply(text):
+    """The JSON object in an agent's final message: a fenced block or the outermost braces."""
+    text = str(text or "").strip()
+    m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
+    cand = m.group(1) if m else text[text.find("{"): text.rfind("}") + 1] if "{" in text else ""
+    try:
+        o = json.loads(cand)
+    except ValueError:
+        return None
+    return o if isinstance(o, dict) else None
+
+
+def _engine_slot(cfg):
+    if _engine_slots["sem"] is None or _engine_slots["n"] != int(cfg.get("max_engines") or 4):
+        _engine_slots["n"] = max(1, int(cfg.get("max_engines") or 4))
+        _engine_slots["sem"] = threading.BoundedSemaphore(_engine_slots["n"])
+    return _engine_slots["sem"]
+
+
+def _files_touched(parsed):
+    out = []
+    for sec in parsed.get("sections") or []:
+        for it in sec["items"]:
+            if it["kind"] == "tool" and it.get("key"):
+                name, _, target = it["key"].partition(" ")
+                if name in EDIT_TOOLS and target and target not in out:
+                    out.append(target)
+    return out
+
+
+def _commits(root, since, limit=30):
+    if not root or not Path(root).is_dir():
+        return []
+    r = subprocess.run(["git", "-C", root, "log", "--since", iso(since), "--no-merges", "-n", str(limit),
+                        "--format=%H%x09%cI%x09%s"], capture_output=True, text=True)
+    out = []
+    for line in (r.stdout or "").splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) == 3:
+            out.append({"sha": parts[0], "short": parts[0][:8], "at": parts[1], "day": _uday(parts[1]), "subject": parts[2][:200]})
+    return out
+
+
+def build_activity(group, metas, parsed_by_id, reg, since):
+    """Recon, done by code: per session when, where, what the owner asked first and which files changed; per repo
+    the commits. This is both the first thing hunters read and what the Review page shows as "What you did"."""
+    sessions = []
+    for m in sorted(metas, key=lambda x: x.get("first_activity") or ""):
+        p = parsed_by_id.get(m["id"]) or {}
+        users = sum(1 for s in p.get("sections") or [] for it in s["items"] if it["kind"] == "msg" and it["role"] == "user" and not it["side"])
+        sessions.append({"id": m["id"], "repo": m.get("repo"), "repo_root": m.get("repo_root"),
+                         "first": m.get("first_activity"), "last": m.get("last_activity"), "day": _uday(m.get("last_activity") or m.get("first_activity")),
+                         "first_message": m.get("first_message") or first_user_message(p), "user_messages": users,
+                         "files_changed": _files_touched(p)[:12], "subagents": m.get("subagents", 0),
+                         "already_read_until": m.get("already_read_until")})
+    commits = {}
+    for root in sorted({m["repo_root"] for m in metas if m.get("repo_root")}):
+        r = reg["repos"].get(root) or {}
+        if group != GENERAL and r.get("client") != group:
+            continue
+        cs = _commits(root, since)
+        if cs:
+            commits[r.get("name") or Path(root).name] = cs
+    lines = ["# What the owner did", ""]
+    for s in sessions:
+        lines.append("## Session {} · {} · {} to {} UTC".format(s["id"], s["repo"], (s["first"] or "?")[:16].replace("T", " "),
+                                                            (s["last"] or "?")[11:16]))
+        lines.append("- first message: {}".format(s["first_message"] or "(none)"))
+        lines.append("- messages from the owner: {}{}".format(s["user_messages"], " · subagents: {}".format(s["subagents"]) if s["subagents"] else ""))
+        if s["files_changed"]:
+            lines.append("- files changed: " + ", ".join(s["files_changed"]))
+        if s["already_read_until"]:
+            lines.append("- read in an earlier cycle up to {}; only the part after that is new".format(s["already_read_until"][:16]))
+        lines.append("")
+    for repo, cs in commits.items():
+        lines.append("## Commits in {}".format(repo))
+        lines += ["- {} {} {}".format(c["day"], c["short"], c["subject"]) for c in cs]
+        lines.append("")
+    return {"sessions": sessions, "commits": commits}, "\n".join(lines)
+
+
+def _repo_roots_by_name(metas, reg, group):
+    out = {}
+    for m in metas:
+        root = m.get("repo_root")
+        if not root:
+            continue
+        r = reg["repos"].get(root) or {}
+        for k in {r.get("name"), Path(root).name}:
+            if k:
+                out[k] = root
+    return out
+
+
+def _source_text(src, ctx):
+    """(text, None) for a finding's source, or (None, plain reason it could not be opened)."""
+    m = SOURCE_RE.match(str(src or "").strip())
+    if not m:
+        return None, "the source \"{}\" is not one Somna knows".format(str(src)[:60])
+    kind, ref = m.group(1), m.group(2).strip()
+    if kind == "session":
+        sid = ref if ref in ctx["parsed"] else next((k for k in ctx["parsed"] if len(ref) >= 6 and k.startswith(ref)), None)
+        if not sid:
+            return None, "it names a session that was not part of this run"
+        if sid not in ctx["texts"]:
+            ctx["texts"][sid] = _render(dict(ctx["parsed"][sid], read_until=None), 0)
+        return ctx["texts"][sid], None
+    if kind == "commit":
+        repo, _, sha = ref.partition("@")
+        root = ctx["roots"].get(repo.strip())
+        if not root or not re.match(r"^[0-9a-f]{6,40}$", sha.strip()):
+            return None, "it names a commit Somna could not find"
+        r = subprocess.run(["git", "-C", root, "show", "--format=%H%n%s%n%b", "--stat", "-p", sha.strip()], capture_output=True, text=True)
+        if r.returncode != 0:
+            return None, "it names a commit that is not in {}".format(repo)
+        return r.stdout[:400000], None
+    if kind == "memory":
+        rel = ref if ref.startswith("memory/") else "memory/" + ref
+        if ".." in rel:
+            return None, "bad memory path"
+        f = ctx["wt"] / rel
+        return (f.read_text(errors="replace"), None) if f.is_file() else (None, "it quotes a memory file that does not exist")
+    repo, _, path = ref.partition("/")
+    root = ctx["roots"].get(repo)
+    if not root or ".." in path:
+        return None, "it quotes a repo that is not in this scope"
+    f = Path(root) / path
+    return (f.read_text(errors="replace"), None) if f.is_file() else (None, "it quotes {} which does not exist in {}".format(path, repo))
+
+
+def _line_has(text, lineno, needle, slack=3):
+    lines = text.splitlines()
+    lo, hi = max(0, lineno - 1 - slack), min(len(lines), lineno + slack)
+    return any(_contains(l, needle) for l in lines[lo:hi]) or _contains("\n".join(lines[lo:hi]), needle)
+
+
+def _scope_ok(group, rel):
+    allowed, denied = _group_scope(group)
+    if denied and rel.startswith(tuple(denied)):
+        return False
+    return rel.startswith(tuple(allowed))
+
+
+def check_findings(raw, group, ctx):
+    """Mechanical checks, no Claude: schema, scope, target text, every quote against its source, every path,
+    line and symbol in the repo. Returns findings with a "checks" list and "rejected" (plain reason) when one fails."""
+    out, seen = [], set()
+    for i, f in enumerate(raw[:200]):
+        if not isinstance(f, dict):
+            continue
+        fid = str(f.get("id") or "f{}".format(i + 1))[:20]
+        if fid in seen:
+            fid = "{}-{}".format(fid, i + 1)
+        seen.add(fid)
+        item = {"id": fid, "class": str(f.get("_class") or ""), "action": str(f.get("action") or "").lower(),
+                "file": str(f.get("file") or "").strip()[:200], "section": str(f.get("section") or "").strip()[:120],
+                "target_text": str(f.get("target_text") or "")[:3000], "new_text": str(f.get("new_text") or "")[:3000],
+                "summary": _norm(f.get("summary"))[:400], "confidence": str(f.get("confidence") or "").lower(),
+                "evidence": [], "refs": [], "checks": []}
+        problems = []
+        if item["action"] not in FINDING_ACTIONS:
+            problems.append("its action \"{}\" is not add, replace or remove".format(item["action"][:20]))
+        if item["confidence"] not in CONF:
+            problems.append("its confidence is missing")
+            item["confidence"] = "low"
+        if not item["summary"]:
+            problems.append("it has no summary")
+        rel = item["file"]
+        if not rel.startswith("memory/") or not rel.endswith(".md") or ".." in rel or "//" in rel:
+            problems.append("its file \"{}\" is not a memory file".format(rel[:60]))
+        if item["action"] in ("add", "replace") and not item["new_text"].strip():
+            problems.append("it has no new text")
+        if item["action"] in ("replace", "remove") and not item["target_text"].strip():
+            problems.append("it does not say which text to change")
+        ev = f.get("evidence") if isinstance(f.get("evidence"), list) else []
+        refs = f.get("refs") if isinstance(f.get("refs"), list) else []
+        if not ev:
+            problems.append("it has no evidence")
+        for e in ev[:5]:
+            if isinstance(e, dict):
+                item["evidence"].append({"source": str(e.get("source") or "")[:200], "quote": str(e.get("quote") or "")[:600],
+                                         "line": e.get("line") if isinstance(e.get("line"), int) else None})
+        for r in refs[:8]:
+            if isinstance(r, dict):
+                item["refs"].append({"repo": str(r.get("repo") or "")[:80], "path": str(r.get("path") or "")[:300],
+                                     "line": r.get("line") if isinstance(r.get("line"), int) else None,
+                                     "symbol": str(r.get("symbol") or "")[:120]})
+        if problems:
+            item["checks"].append({"check": "schema", "ok": False, "detail": problems[0]})
+            item["rejected"] = "Its format was wrong: " + problems[0] + "."
+            item["rejected_by"] = "check"
+            out.append(item)
+            continue
+        item["checks"].append({"check": "schema", "ok": True, "detail": "well formed"})
+        item["in_scope"] = _scope_ok(group, rel)
+        f_path = ctx["wt"] / rel
+        cur = f_path.read_text(errors="replace") if f_path.is_file() else ""
+        if item["action"] in ("replace", "remove"):
+            if not cur:
+                item["rejected"] = "It wants to change a file that does not exist."
+            elif not _contains(cur, item["target_text"]):
+                item["rejected"] = "The text it wants to change is not in the file (it may already have changed)."
+            item["checks"].append({"check": "target", "ok": "rejected" not in item, "detail": "text to change found in the file" if "rejected" not in item else "text to change not found"})
+        elif item["action"] == "add":
+            dup = bool(cur) and all(_contains(cur, l) for l in item["new_text"].splitlines() if l.strip(" -*"))
+            if dup:
+                item["rejected"] = "Memory already says this."
+            item["checks"].append({"check": "target", "ok": not dup, "detail": "not in memory yet" if not dup else "already in memory"})
+        if "rejected" in item:
+            item["rejected_by"] = "check"
+            out.append(item)
+            continue
+        found, why = 0, []
+        for e in item["evidence"]:
+            text, err = _source_text(e["source"], ctx)
+            if err:
+                why.append(err)
+                e["found"] = False
+                continue
+            ok = _contains(text, e["quote"]) and (e["line"] is None or not e["source"].startswith(("memory:", "repo:")) or _line_has(text, e["line"], e["quote"]))
+            e["found"] = ok
+            if ok:
+                found += 1
+            else:
+                why.append("the quote from {} is not in it{}".format(e["source"].split(":", 1)[0],
+                           " at line {}".format(e["line"]) if e["line"] else ""))
+        item["checks"].append({"check": "quotes", "ok": found > 0, "detail": "{} of {} quotes found word for word".format(found, len(item["evidence"]))})
+        if not found:
+            item["rejected"] = "None of its evidence could be found in your sessions or files ({}).".format(why[0] if why else "no quotes")
+            item["rejected_by"] = "check"
+            out.append(item)
+            continue
+        bad_refs = []
+        for r in item["refs"]:
+            root = ctx["roots"].get(r["repo"])
+            if not root:
+                bad_refs.append("repo {} is not in this scope".format(r["repo"] or "?"))
+                continue
+            p = Path(root) / r["path"]
+            if not r["path"] or ".." in r["path"] or not p.exists():
+                bad_refs.append("{} does not exist in {}".format(r["path"] or "(no path)", r["repo"]))
+                continue
+            if p.is_file() and (r["line"] or r["symbol"]):
+                body = p.read_text(errors="replace")
+                n = len(body.splitlines())
+                if r["line"] and not (1 <= r["line"] <= n):
+                    bad_refs.append("{} has {} lines, not {}".format(r["path"], n, r["line"]))
+                elif r["symbol"] and not (_line_has(body, r["line"], r["symbol"], 12) if r["line"] else r["symbol"] in body):
+                    bad_refs.append("{} is not in {}{}".format(r["symbol"], r["path"], " near line {}".format(r["line"]) if r["line"] else ""))
+        if item["refs"]:
+            item["checks"].append({"check": "code", "ok": not bad_refs, "detail": "paths, lines and names exist in the repo" if not bad_refs else bad_refs[0]})
+        if bad_refs:
+            item["rejected"] = "It names code that does not exist: {}.".format(bad_refs[0])
+            item["rejected_by"] = "check"
+        out.append(item)
+    return out
+
+
+def _with_asof(rel, text, day):
+    if not rel.startswith("memory/clients/") or not day:
+        return text
+    out = []
+    for l in text.splitlines():
+        s = l.rstrip()
+        if s.lstrip().startswith(("-", "*")) and "(as of " not in s:
+            s += " (as of {})".format(day)
+        out.append(s)
+    return "\n".join(out)
+
+
+def apply_finding(wt, f, day=None):
+    """Apply one finding to the working copy. Returns True when the file changed."""
+    p = wt / f["file"]
+    cur = p.read_text() if p.is_file() else ""
+    new_text = _with_asof(f["file"], f.get("new_text") or "", day)
+    if f["action"] == "add":
+        sec = f.get("section") or ""
+        lines = cur.splitlines()
+        if sec and sec.startswith("#"):
+            idx = next((i for i, l in enumerate(lines) if _norm(l) == _norm(sec)), None)
+            if idx is None:
+                lines += ([""] if lines and lines[-1].strip() else []) + [sec] + new_text.splitlines()
+            else:
+                end = next((j for j in range(idx + 1, len(lines)) if lines[j].startswith("#")), len(lines))
+                while end > idx + 1 and not lines[end - 1].strip():
+                    end -= 1
+                lines[end:end] = new_text.splitlines()
+        else:
+            lines += new_text.splitlines()
+        out = "\n".join(lines).rstrip() + "\n"
+    else:
+        tgt = f["target_text"]
+        if tgt in cur:
+            out = cur.replace(tgt, new_text if f["action"] == "replace" else "", 1)
+        else:
+            # whitespace differs: match line by line on normalized text
+            lines, want = cur.splitlines(), [_norm(x) for x in tgt.splitlines() if x.strip()]
+            out = None
+            for i in range(len(lines)):
+                win = [j for j in range(i, len(lines)) if lines[j].strip()][:len(want)]
+                if len(win) == len(want) and [_norm(lines[j]) for j in win] == want:
+                    rep = new_text.splitlines() if f["action"] == "replace" else []
+                    out = "\n".join(lines[:win[0]] + rep + lines[win[-1] + 1:]) + "\n"
+                    break
+            if out is None:
+                return False
+        out = re.sub(r"\n{3,}", "\n\n", out)
+    if out == cur:
+        return False
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(out)
+    return True
+
+
+def _skip_classes(classes, group, metas, parsed_by_id, wt):
+    """Hunters only run when they have something to look at."""
+    keep = []
+    inbox_dirs = [wt / "memory" / "inbox" / group] if group != GENERAL else []
+    notes = [wt / "memory" / "scratch" / "notes.md"] if group == GENERAL else []
+    pending = []
+    for d in inbox_dirs:
+        if d.is_dir():
+            for f in d.glob("*.md"):
+                pending += [l for l in f.read_text(errors="replace").splitlines() if l.startswith("- ")]
+    for f in notes:
+        if f.is_file():
+            pending += [l for l in f.read_text(errors="replace").splitlines() if l.startswith("- ")]
+    said = any(CORRECTION_RE.search(it["text"] or "") for m in metas for s in (parsed_by_id.get(m["id"]) or {}).get("sections", [])
+               for it in s["items"] if it["kind"] == "msg" and it["role"] == "user")
+    for c in classes:
+        if c == "tidy" and not pending:
+            continue
+        if c == "corrections" and not said and not any(("CORRECTION" in l or "owner accepted" in l) for l in pending):
+            continue
+        keep.append(c)
+    return keep
+
+
+def _decision_type(f):
+    if f["class"] == "corrections":
+        return "corrected"
+    if f["class"] == "tidy":
+        return "merged" if f["action"] != "remove" else "reorganized"
+    if f["action"] == "remove":
+        return "removed"
+    if f["action"] == "replace":
+        return "replaced"
+    return "new"
+
+
+def _human_evidence(f, metas_by_id, activity):
+    out = []
+    for e in f.get("evidence") or []:
+        m = SOURCE_RE.match(e.get("source") or "")
+        if not m:
+            continue
+        kind, ref = m.group(1), m.group(2)
+        if kind == "session":
+            meta = metas_by_id.get(ref) or next((v for k, v in metas_by_id.items() if k.startswith(ref)), {})
+            out.append({"kind": "session", "id": meta.get("id", ref), "at": meta.get("last_activity") or meta.get("first_activity"),
+                        "repo": meta.get("repo"), "title": meta.get("first_message") or "", "quote": e.get("quote"), "found": e.get("found")})
+        elif kind == "commit":
+            repo, _, sha = ref.partition("@")
+            c = next((c for c in (activity.get("commits") or {}).get(repo, []) if c["sha"].startswith(sha.strip())), None)
+            out.append({"kind": "commit", "id": sha[:8], "at": c["at"] if c else None, "repo": repo, "title": c["subject"] if c else "",
+                        "quote": e.get("quote"), "found": e.get("found")})
+        else:
+            out.append({"kind": "file", "id": ref, "title": ref, "quote": e.get("quote"), "found": e.get("found")})
+    return out
+
+
+def run_staged(g, ctx):
+    """One scope through recon, hunt, validate, check, verify and apply. ctx carries the cycle's shared state."""
+    cfg, ddir, gwt, metas, title = ctx["cfg"], ctx["ddir"], ctx["gwt"], ctx["metas"], ctx["title"]
+    parsed_by_id, reg = ctx["parsed_by_id"], ctx["reg"]
+    run, rec_lock, rec = ctx["run"], ctx["rec_lock"], ctx["rec"]
+    engine, model = ctx["engine"], ctx["model"]
+    roots_by_name = _repo_roots_by_name(metas, reg, g)
+    roots = sorted(set(roots_by_name.values()))
+    usage_all = {"total_cost_usd": 0.0, "num_turns": 0, "tokens": {}, "memory_reads": 0, "memory_writes": 0}
+    stages = []
+
+    def stage(name, **kw):
+        with rec_lock:
+            run["stage"] = name
+            st = next((s for s in stages if s["stage"] == name), None)
+            if not st:
+                st = {"stage": name}
+                stages.append(st)
+            st.update(kw)
+            run["stages"] = stages
+            save_rec(rec)
+        log("info", "stage." + name, "{}: {}".format(title, name), group=g, **{k: v for k, v in kw.items() if k != "status"})
+
+    def call(kind, prompt, mdl):
+        (ddir / "prompt-{}-{}.md".format(slug(g), kind)).write_text(prompt)
+        cmd = _engine_cmd(cfg, engine, prompt, "Read,Glob,Grep", [ddir] + roots, edits=False, model=mdl)
+        with _engine_slot(cfg):
+            if cancel_requested(ddir):
+                raise CycleCanceled()
+            u = _run_engine(cmd, gwt, cfg["timeout_minutes"] * 60, ddir / "engine-{}.log".format(slug(g)), "cycle " + g,
+                            ddir=ddir, group=g, roots=[(gwt, ""), (ddir, "run/")], usage_key="{}:{}".format(g, kind))
+        usage_all["total_cost_usd"] += u.get("total_cost_usd") or 0
+        usage_all["num_turns"] += u.get("num_turns") or 0
+        usage_all["memory_reads"] += u.get("memory_reads") or 0
+        for k, v in (u.get("tokens") or {}).items():
+            usage_all["tokens"][k] = usage_all["tokens"].get(k, 0) + (v or 0)
+        return parse_json_reply(u.get("result"))
+
+    # recon
+    activity, brief = build_activity(g, metas, parsed_by_id, reg, ctx["since"])
+    apath = ddir / "activity-{}.md".format(slug(g))
+    apath.write_text(brief)
+    activity["title"] = title
+    with rec_lock:
+        rec.setdefault("activity", {})[g] = activity
+    stage("recon", status="done", sessions=len(activity["sessions"]), commits=sum(len(v) for v in activity["commits"].values()))
+    subs = _prompt_subs(gwt, ddir, g, title, metas, reg, ctx["since"], ctx["steering"], ddir / "report-{}.md".format(g),
+                        ctx["instructions"], None, True, cfg)
+    subs["{{ACTIVITY_PATH}}"] = str(apath)
+    subs["{{SCOPE}}"] = "Findings that are applied may only change: {}".format(", ".join(_group_scope(g)[0])) + (
+        ". Not: " + ", ".join(_group_scope(g)[1]) if _group_scope(g)[1] else "")
+
+    # hunt
+    read_kb = sum(m.get("read_kb") or m.get("size_kb") or 0 for m in metas)
+    snk = cfg.get("small_night_kb")
+    small = len(metas) <= 2 and read_kb <= float(40 if snk is None else snk)
+    classes = ["all"] if small else _skip_classes([c for c in (cfg.get("hunters") or []) if c in HUNT_CLASSES and c != "all"] or ["stale", "new"],
+                                                  g, metas, parsed_by_id, gwt)
+    tpl_path = HOME / "engine" / "hunt-prompt.md"
+    hunt_tpl = tpl_path.read_text() if tpl_path.exists() else DEFAULT_HUNT_PROMPT
+    stage("hunt", status="running", classes=classes, small_night=small)
+    raw, hunt_fail = [], []
+
+    def hunt(c):
+        _current_cycle.id = rec["id"]
+        p = _fill(hunt_tpl, dict(subs, **{"{{CLASS}}": c, "{{CLASS_TITLE}}": HUNT_CLASSES[c][0],
+                                          "{{CLASS_TASK}}": _fill(HUNT_CLASSES[c][1], subs)}))
+        try:
+            o = call("hunt-" + c, p, cfg.get("hunt_model") or model)
+        except CycleCanceled:
+            raise
+        except SomnaError as e:
+            return c, None, str(e)
+        if o is None or not isinstance(o.get("findings"), list):
+            return c, None, "its reply was not the findings JSON"
+        return c, o["findings"], None
+
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+    with _TPE(max_workers=max(1, len(classes))) as pool:
+        for c, fs, err in pool.map(hunt, classes):
+            if err:
+                hunt_fail.append({"class": c, "error": err})
+                log("warn", "hunt.failed", "hunter {} failed: {}".format(c, err), group=g)
+                continue
+            for f in fs:
+                if isinstance(f, dict):
+                    f["_class"] = c if c != "all" else str(f.get("class") or "all")
+                    f["id"] = "{}-{}".format(c, f.get("id") or len(raw) + 1)
+                    raw.append(f)
+    if hunt_fail and len(hunt_fail) == len(classes):
+        stage("hunt", status="failed", errors=hunt_fail)
+        raise SomnaError("every hunter failed ({})".format(hunt_fail[0]["error"]), etype="internal_error")
+    stage("hunt", status="done", findings=len(raw), failed=[h["class"] for h in hunt_fail])
+    (ddir / "findings-{}.raw.json".format(slug(g))).write_text(json.dumps({"findings": raw}, indent=1))
+
+    # mechanical checks (schema, scope, target text, quotes, code refs)
+    cctx = {"wt": gwt, "parsed": parsed_by_id, "texts": {}, "roots": roots_by_name}
+    findings = check_findings(raw, g, cctx)
+    alive = [f for f in findings if not f.get("rejected")]
+    stage("check", status="done", passed=len(alive), rejected=len(findings) - len(alive))
+
+    # validate: try to disprove
+    validated = not small and bool(alive)
+    if validated:
+        fpath = ddir / "findings-{}.json".format(slug(g))
+        fpath.write_text(json.dumps({"findings": [{k: f[k] for k in ("id", "action", "file", "section", "target_text", "new_text",
+                                                                        "summary", "evidence", "refs", "confidence")} for f in alive]}, indent=1))
+        vt = (HOME / "engine" / "validate-prompt.md")
+        vt = vt.read_text() if vt.exists() else DEFAULT_VALIDATE_PROMPT
+        stage("validate", status="running", findings=len(alive))
+        try:
+            o = call("validate", _fill(vt, dict(subs, **{"{{FINDINGS_PATH}}": str(fpath)})), cfg.get("check_model") or model)
+        except SomnaError as e:
+            o = None
+            log("warn", "validate.failed", str(e), group=g)
+        verdicts = {str(v.get("id")): v for v in ((o or {}).get("verdicts") or []) if isinstance(v, dict)}
+        for f in alive:
+            v = verdicts.get(f["id"])
+            if not v:
+                f["validator"] = {"verdict": "missing", "reason": "the validator gave no verdict"}
+            else:
+                f["validator"] = {"verdict": str(v.get("verdict") or "").lower(), "reason": _norm(v.get("reason"))[:400],
+                                  "quote": str(v.get("quote") or "")[:400], "source": str(v.get("source") or "")[:200]}
+                if f["validator"]["verdict"] == "refuted":
+                    text, err = _source_text(f["validator"]["source"], cctx)
+                    if text and _contains(text, f["validator"]["quote"]):
+                        f["rejected"] = "Disproved: " + (f["validator"]["reason"] or "a source says otherwise.")
+                        f["rejected_by"] = "validator"
+                    else:
+                        # a refutation must quote its source too; one that cannot be found makes the finding a question
+                        f["validator"]["verdict"] = "unsure"
+                        f["validator"]["reason"] = (f["validator"]["reason"] + " (its quote could not be found)").strip()
+            f["checks"].append({"check": "validator", "ok": f["validator"]["verdict"] == "upheld",
+                                "detail": {"upheld": "could not be disproved", "refuted": "disproved"}.get(f["validator"]["verdict"], "not sure")})
+        alive = [f for f in alive if not f.get("rejected")]
+        stage("validate", status="done" if o is not None else "failed", upheld=sum(1 for f in alive if f["validator"]["verdict"] == "upheld"),
+              refuted=sum(1 for f in findings if f.get("rejected_by") == "validator"))
+
+    # verify: a fresh agent, sources only, no reasoning
+    if alive:
+        cpath = ddir / "changes-{}.json".format(slug(g))
+        cpath.write_text(json.dumps({"changes": [{"id": f["id"], "file": f["file"], "action": f["action"], "section": f["section"],
+                                                   "target_text": f["target_text"], "new_text": f["new_text"],
+                                                   "sources": [e["source"] for e in f["evidence"]]} for f in alive]}, indent=1))
+        vf = (HOME / "engine" / "verify-prompt.md")
+        vf = vf.read_text() if vf.exists() else DEFAULT_VERIFY_PROMPT
+        stage("verify", status="running", changes=len(alive))
+        try:
+            o = call("verify", _fill(vf, dict(subs, **{"{{CHANGES_PATH}}": str(cpath)})), cfg.get("check_model") or model)
+        except SomnaError as e:
+            o = None
+            log("warn", "verify.failed", str(e), group=g)
+        checks = {str(v.get("id")): v for v in ((o or {}).get("checks") or []) if isinstance(v, dict)}
+        for f in alive:
+            v = checks.get(f["id"]) or {}
+            f["verifier"] = {"verdict": str(v.get("verdict") or "missing").lower(), "reason": _norm(v.get("reason"))[:400]}
+            if f["verifier"]["verdict"] == "reject":
+                f["rejected"] = "A second, independent check disagreed: " + (f["verifier"]["reason"] or "it found the sources do not support this.")
+                f["rejected_by"] = "verifier"
+            f["checks"].append({"check": "independent", "ok": f["verifier"]["verdict"] == "confirm",
+                                "detail": {"confirm": "confirmed by a fresh agent", "reject": "rejected by a fresh agent"}.get(f["verifier"]["verdict"], "not sure")})
+        stage("verify", status="done" if o is not None else "failed", confirmed=sum(1 for f in alive if f["verifier"]["verdict"] == "confirm"),
+              rejected=sum(1 for f in alive if f.get("rejected_by") == "verifier"))
+
+    # apply
+    metas_by_id = {m["id"]: m for m in metas}
+    dating = {"sessions": {m["id"]: m.get("last_activity") for m in metas}, "read_sessions": load_state().get("read_sessions", {}),
+              "roots": roots}
+    cache, decs, applied_files = {}, [], set()
+    for f in findings:
+        ids = []
+        for e in f.get("evidence") or []:
+            m = SOURCE_RE.match(e.get("source") or "")
+            if m and m.group(1) == "session":
+                ids.append(m.group(2))
+            elif m and m.group(1) == "commit":
+                ids.append(m.group(2).partition("@")[2].strip())
+        info = evidence_info(ids, None, dating["sessions"], dating["read_sessions"], roots, cache)
+        newest = info["days"][-1] if info["days"] else None
+        tgt_raw = git("log", "-1", "--format=%cI", "HEAD", "--", f["file"], check=False, cwd=gwt) if f.get("file") else ""
+        d = {"group": g, "file": f["file"], "summary": f["summary"] or "(no summary)", "plain": f["summary"],
+             "type": _decision_type(f), "confidence": f["confidence"], "evidence": ids, "evidence_count": len(ids),
+             "evidence_human": _human_evidence(f, metas_by_id, activity), "action": f["action"], "section": f["section"],
+             "target_text": f["target_text"], "new_text": f["new_text"], "proposed": f["new_text"] if f["action"] != "remove" else "(remove) " + f["target_text"],
+             "finding": f["id"], "finding_class": f["class"], "checks": f["checks"], "staged": True,
+             "refs": f.get("refs") or [], "validator": f.get("validator"), "verifier": f.get("verifier"),
+             "scope": "client" if (g != GENERAL and f["file"].startswith(("memory/clients/{}/".format(g), "memory/inbox/{}/".format(g)))) else "general"}
+        if newest:
+            d["evidence_newest"] = newest
+        if tgt_raw:
+            d["target_updated"] = _uday(tgt_raw)
+        d["accept_to"] = f["file"]
+        if f.get("rejected"):
+            d.update(applied=False, dropped="rejected", drop_reason=f["rejected"], rejected_by=f.get("rejected_by"),
+                     dismissed_at=iso(utcnow()))
+            decs.append(d)
+            continue
+        if is_outdated(info, tgt_raw):
+            d.update(applied=False, dropped="outdated", dismissed_at=iso(utcnow()),
+                     drop_reason="Already covered: its sessions were curated before and the file was updated on {}.".format(_uday(tgt_raw)))
+            decs.append(d)
+            continue
+        why = []
+        if not f.get("in_scope"):
+            why.append("it belongs to another part of memory, so you decide")
+        if f["confidence"] == "low":
+            why.append("Claude was not sure")
+        if validated and (f.get("validator") or {}).get("verdict") != "upheld":
+            why.append("the check that tries to disprove it was not sure")
+        if (f.get("verifier") or {}).get("verdict") != "confirm":
+            why.append("the independent check was not sure")
+        if why:
+            d.update(applied=False, held_reason="; ".join(why))
+        else:
+            ok = apply_finding(gwt, f, newest)
+            d["applied"] = bool(ok)
+            if ok:
+                applied_files.add(f["file"])
+            else:
+                d.update(dropped="rejected", drop_reason="It could not be applied: the text had changed.", dismissed_at=iso(utcnow()))
+        decs.append(d)
+    stage("apply", status="done", saved=sum(1 for d in decs if d.get("applied")),
+          questions=sum(1 for d in decs if not d.get("applied") and not d.get("dropped")),
+          dropped=sum(1 for d in decs if d.get("dropped")))
+    (ddir / "findings-{}.final.json".format(slug(g))).write_text(json.dumps({"findings": findings}, indent=1))
+
+    # report, written by code from what actually happened
+    rep = ["## What you did"]
+    for s in activity["sessions"]:
+        rep.append("- {} · {} · \"{}\"".format(s["day"] or "?", s["repo"], s["first_message"] or "(no message)"))
+    for repo, cs in activity["commits"].items():
+        rep.append("- {}: {} commit{}".format(repo, len(cs), "" if len(cs) == 1 else "s"))
+    sv = [d for d in decs if d.get("applied")]
+    qs = [d for d in decs if not d.get("applied") and not d.get("dropped")]
+    dr = [d for d in decs if d.get("dropped")]
+    rep.append("\n## Changes")
+    rep += ["- {}".format(d["plain"]) for d in sv] or ["- none"]
+    rep.append("\n## Questions for the owner")
+    rep += ["- {} ({})".format(d["plain"], d.get("held_reason", "")) for d in qs] or ["- none"]
+    rep.append("\n## Checked and dropped")
+    rep += ["- {} {}".format(d["plain"], d.get("drop_reason", "")) for d in dr] or ["- none"]
+    (ddir / "report-{}.md".format(g)).write_text("\n".join(rep) + "\n")
+    usage_all["total_cost_usd"] = round(usage_all["total_cost_usd"], 4)
+    return decs, usage_all, stages
 
 
 def _do_create(since_hours=None, since_last=False, dry_run=False, out=print, instructions=None, model=None, session_ids=None):
@@ -1912,6 +2753,8 @@ def _do_create(since_hours=None, since_last=False, dry_run=False, out=print, ins
         order = sorted(groups, key=lambda g: (g == GENERAL, g))
         workers = max(1, min(int(cfg.get("parallel_runs") or 1), len(order)))
         hold = bool(cfg.get("hold_low_confidence", True))
+        staged = (cfg.get("pipeline") or "staged") == "staged"
+        rec["pipeline"] = "staged" if staged else "single"
         rec_lock = threading.Lock()
         runs, gwts = {}, {}
         for g in order:
@@ -1934,13 +2777,20 @@ def _do_create(since_hours=None, since_last=False, dry_run=False, out=print, ins
             with rec_lock:
                 run["status"] = "running"
                 save_rec(rec)
-            prompt = _build_prompt(template, gwt, ddir, g, title, groups[g], reg, since, steering, report, instructions,
-                                   dpath, hold, cfg)
-            (ddir / "prompt-{}.md".format(g)).write_text(prompt)
-            cmd = _engine_cmd(cfg, engine, prompt, cfg["allowed_tools"], [ddir], model=model)
+            staged_decs = None
             try:
-                usage = _run_engine(cmd, gwt, cfg["timeout_minutes"] * 60, ddir / "engine-{}.log".format(slug(g)), "cycle " + g,
-                                    ddir=ddir, group=g, roots=[(gwt, ""), (ddir, "run/")])
+                if staged:
+                    staged_decs, usage, _stages = run_staged(g, {
+                        "cfg": cfg, "ddir": ddir, "gwt": gwt, "metas": groups[g], "title": title, "parsed_by_id": parsed_by_id,
+                        "reg": reg, "run": run, "rec_lock": rec_lock, "rec": rec, "engine": engine, "model": model,
+                        "since": since, "steering": steering, "instructions": instructions})
+                else:
+                    prompt = _build_prompt(template, gwt, ddir, g, title, groups[g], reg, since, steering, report, instructions,
+                                           dpath, hold, cfg)
+                    (ddir / "prompt-{}.md".format(g)).write_text(prompt)
+                    cmd = _engine_cmd(cfg, engine, prompt, cfg["allowed_tools"], [ddir], model=model)
+                    usage = _run_engine(cmd, gwt, cfg["timeout_minutes"] * 60, ddir / "engine-{}.log".format(slug(g)), "cycle " + g,
+                                        ddir=ddir, group=g, roots=[(gwt, ""), (ddir, "run/")])
             except CycleCanceled:
                 raise
             except SomnaError as e:
@@ -1972,7 +2822,15 @@ def _do_create(since_hours=None, since_last=False, dry_run=False, out=print, ins
                     if d_:
                         fd[rel_] = d_
             dating["file_dates"] = fd
-            decs, dstatus = read_decisions(dpath, g, changed, hold, dating)
+            if staged_decs is not None:
+                decs, dstatus = staged_decs, "ok"
+                explained = {d["file"] for d in decs if d.get("applied")}
+                for f_ in changed:
+                    if not is_log_path(f_) and f_ not in explained:
+                        decs.append({"group": g, "file": f_, "summary": "changed without a recorded decision", "type": "unexplained",
+                                     "confidence": "low", "evidence": [], "evidence_count": 0, "applied": True, "synthetic": True})
+            else:
+                decs, dstatus = read_decisions(dpath, g, changed, hold, dating)
             with rec_lock:
                 run.update(status="completed", cost_usd=usage.get("total_cost_usd"), turns=usage.get("num_turns"),
                            tokens=usage.get("tokens"), memory_reads=usage.get("memory_reads"),
@@ -2507,7 +3365,7 @@ def open_questions():
                 age = (utcnow() - parse_iso(r["created_at"])).days
             except (KeyError, ValueError):
                 age = 0
-            out.append(dict(d, cycle=r["id"], index=i, created_at=r["created_at"],
+            out.append(dict(humanize_decision(d, r), cycle=r["id"], index=i, created_at=r["created_at"],
                             expires_in_days=max(0, int(cfg.get("held_expiry_days", 7)) - age)))
     return out
 
@@ -2906,6 +3764,8 @@ SETTINGS_FIELDS = {
     "parallel_runs": ("int", 1, 8), "default_since_hours": ("int", 1, 24 * 30),
     "hold_low_confidence": ("bool", None, None), "auto_close_empty": ("bool", None, None),
     "notify": ("bool", None, None), "stream_events": ("bool", None, None),
+    "pipeline": ("choice", ("staged", "single"), None), "hunt_model": ("model", None, None), "check_model": ("model", None, None),
+    "small_night_kb": ("int", 0, 1000), "max_engines": ("int", 1, 12),
 }
 
 
@@ -3491,6 +4351,17 @@ def job_progress():
                 started[m.group(1)] = _ts(e)
             elif e["event"] in ("engine.done", "engine.failed", "engine.timeout", "engine.canceled"):
                 ended.add(m.group(1))
+        stage_of = {}
+        if cur.get("pipeline") == "staged":
+            ended = set()
+            for e in events:
+                gg = (e.get("data") or {}).get("group")
+                if e["event"].startswith("stage.") and gg:
+                    stage_of[gg] = e["event"][6:]
+                    started.setdefault(gg, _ts(e))
+                    if e["event"] == "stage.apply":
+                        ended.add(gg)
+            ended |= {r_["group"] for r_ in cur.get("runs") or [] if r_.get("status") in ("failed", "completed")}
         n = max(len(groups), 1)
         label = lambda g: "General memory" if g == GENERAL else (reg.get("clients", {}).get(g, {}).get("name") or g)
         active = [g for g in groups if g in started and g not in ended]
@@ -3504,7 +4375,12 @@ def job_progress():
                 elif g in started:
                     done_frac += min(1 - pow(2.718, -(now - started[g]) / typical), 0.95)
             percent = 10 + 80.0 * done_frac / n
-            if active:
+            if active and stage_of:
+                words = {"recon": "reading your work", "hunt": "looking for changes", "check": "checking quotes and code",
+                         "validate": "trying to disprove what it found", "verify": "fresh check by a second agent", "apply": "saving"}
+                step = "; ".join("{}: {}".format(label(g), words.get(stage_of.get(g), "starting")) for g in active[:3])
+                title = "Running · " + ", ".join(label(g) for g in active[:2]) + (" +{}".format(len(active) - 2) if len(active) > 2 else "")
+            elif active:
                 step = "Claude is curating {} ({} of {} running)".format(" and ".join(label(g) for g in active[:3]), len(active), n)
                 title = "Running · " + ", ".join(label(g) for g in active[:2]) + (" +{}".format(len(active) - 2) if len(active) > 2 else "")
             elif groups and len(ended) >= len(groups):
@@ -3831,6 +4707,41 @@ def _cycle_summary(r):
             "selected_sessions": bool(sess.get("selected")), "decision_counts": r.get("decision_counts")}
 
 
+def humanize_decision(d, rec):
+    """Plain-language view of a decision for the page: where it goes, and its evidence as moments the owner
+    remembers (date, repo, what they asked) instead of ids. Works for older records too."""
+    d = dict(d)
+    d["where"] = friendly_file(d.get("file"))
+    if d.get("accept_to"):
+        to = d["accept_to"]
+        if d.get("staged"):
+            d["accept_where"] = friendly_file(d.get("file"))
+        elif to.startswith("memory/scratch/"):
+            d["accept_where"] = "your notes"
+        elif to.startswith("memory/inbox/") and str(d.get("file") or "").startswith("memory/clients/"):
+            d["accept_where"] = friendly_file(d["file"])
+        else:
+            d["accept_where"] = friendly_file(to)
+    if not d.get("evidence_human"):
+        sess = next((i for i in rec.get("inputs") or [] if i.get("type") == "sessions"), {})
+        metas = {m["id"]: m for m in sess.get("sessions") or []}
+        hum = []
+        for e in d.get("evidence") or []:
+            e = str(e)
+            m = metas.get(e) or next((v for k, v in metas.items() if len(e) >= 6 and k.startswith(e)), None)
+            if m:
+                hum.append({"kind": "session", "id": m["id"], "at": m.get("last_activity") or m.get("first_activity"),
+                            "repo": m.get("repo"), "title": m.get("first_message") or ""})
+            elif re.match(r"^[0-9a-f]{7,40}$", e):
+                hum.append({"kind": "commit", "id": e[:8], "title": ""})
+            elif e.startswith(("cyc_", "drm_")):
+                hum.append({"kind": "answer", "id": e, "title": "your earlier answer"})
+            else:
+                hum.append({"kind": "other", "id": e, "title": e})
+        d["evidence_human"] = hum
+    return d
+
+
 def _cycle_detail(did):
     rec = load_rec(did)
     ddir = CYCLES / did
@@ -3844,6 +4755,7 @@ def _cycle_detail(did):
     diff = rd(ddir / "diff.patch")
     if not diff and rec.get("outputs") and not rec.get("review"):
         diff = git("diff", memory_base(rec)["commit"], rec["outputs"][0]["ref"], "--", "memory", check=False)
+    rec = dict(rec, decisions=[humanize_decision(d, rec) for d in rec.get("decisions") or []])
     detail = {"record": rec, "summary": _cycle_summary(rec), "report": rd(ddir / "report.md"), "diff": diff,
               "engine_log": "".join(rd(f, 4000) for f in sorted(ddir.glob("engine*.log")))[-6000:] if (rec["status"] == "failed" or rec.get("partial_failures")) else "",
               "run_log": rd(ddir / "run.log", 8000)}

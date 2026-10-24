@@ -53,11 +53,125 @@ mode = os.environ.get("MOCK_MODE", "change")
 log = pathlib.Path(os.environ["HOME"]) / "mock-calls.log"
 with open(log, "a") as fh:
     fh.write(json.dumps({"max_turns": a[a.index("--max-turns") + 1] if "--max-turns" in a else None, "budget": a[a.index("--max-budget-usd") + 1] if "--max-budget-usd" in a else None, "cwd": os.getcwd(), "tools": a[a.index("--tools") + 1], "perm": a[a.index("--permission-mode") + 1],
-                         "kind": "map" if prompt.startswith("MAP REPO") else "cycle", "model": MODEL,
+                         "kind": "map" if prompt.startswith("MAP REPO") else prompt.split("\n", 1)[0].lower() if prompt.startswith(("HUNT", "VALIDATE", "VERIFY")) else "cycle", "model": MODEL,
                          "instructions": re.search(r"<instructions>\n(.*?)\n</instructions>", prompt, re.S).group(1) if "<instructions>" in prompt else None}) + "\n")
 
 if os.environ.get("MOCK_SLOW"):
     time.sleep(float(os.environ["MOCK_SLOW"]))
+
+def _rel(pth):
+    s = str(pth)
+    return "memory/" + s.split("/memory/", 1)[1] if "/memory/" in s else s
+
+
+def _first_user(sdir):
+    for f in sorted(pathlib.Path(sdir).glob("*.md")):
+        if f.name.endswith(".full.md"):
+            continue
+        for line in f.read_text().splitlines():
+            if "**user:** " in line:
+                return f.stem, line.split("**user:** ", 1)[1].strip()
+    return None, None
+
+
+def reply(obj, cost=0.05):
+    step("Read", {"file_path": "x"}, "Reading")
+    if os.environ.get("MOCK_HUNT_BADJSON") and isinstance(obj, dict) and "findings" in obj:
+        finish("I looked around and found a few things worth noting.", cost, 3)
+    else:
+        finish(json.dumps(obj), cost, 3)
+    sys.exit(0)
+
+
+if prompt.startswith("HUNT"):
+    if mode == "fail" or (os.environ.get("MOCK_HUNT_FAIL") and os.environ["MOCK_HUNT_FAIL"] in prompt.split("\n", 1)[0]):
+        print("hunter crashed", file=sys.stderr); sys.exit(3)
+    cls = prompt.split("\n", 1)[0].split()[1]
+    group = re.search(r"\(group id: (\S+)\)", prompt).group(1)
+    sdir = re.search(r"Session digests, one file per session: (\S+)", prompt).group(1)
+    mem = pathlib.Path(re.search(r"Memory \(read it first, to know what is already there\): (\S+)", prompt).group(1))
+    sid, quote = _first_user(sdir)
+    out = []
+    if mode == "nochange":
+        reply({"findings": []})
+    pairs = re.findall(r"context `([^`]+)`, inbox `([^`]+)`", prompt)
+    if cls in ("new", "all"):
+        if group == "general":
+            gf = mem / "work" / "releases.md"
+            out.append({"id": "g1", "action": "add", "file": "memory/work/releases.md", "section": "## Lessons learned",
+                        "new_text": "- General lesson {}".format(int(time.time() * 1000)),
+                        "summary": "A lesson from today's work goes into your release notes.",
+                        "evidence": [{"source": "session:" + sid, "quote": quote}], "refs": [], "confidence": "high"})
+        for ctx, inbox in pairs:
+            i = pathlib.Path(inbox)
+            notes = [l for l in (i.read_text().splitlines() if i.exists() else []) if l.startswith("- ")]
+            for n, line in enumerate(notes or ["- {}".format(quote)]):
+                text = re.sub(r"^- \d{4}-\d{2}-\d{2}: ", "- ", line)
+                ev = [{"source": "session:" + sid, "quote": quote}]
+                if notes:
+                    ev.append({"source": "memory:" + _rel(inbox), "quote": line})
+                out.append({"id": "n{}".format(len(out) + 1), "action": "add", "file": _rel(ctx), "section": "## Current state",
+                            "new_text": text if notes else ("- cycle {} update".format(group) if os.environ.get("MOCK_HUNT_FIXED") else "- cycle {} update from {}".format(group, sid)),
+                            "summary": "Your latest work on this repo is now in its context.", "evidence": ev, "refs": [],
+                            "confidence": "high"})
+        held_file = _rel(pairs[0][0]) if pairs else "memory/work/releases.md"
+        out.append({"id": "q1", "action": "add", "file": held_file, "section": "## Current state" if pairs else "## Lessons learned",
+                    "new_text": "- Moving to Terragrunt is being discussed", "summary": "Terragrunt was mentioned once, so this is only a question.",
+                    "evidence": [{"source": "session:" + sid, "quote": quote}], "refs": [], "confidence": "low"})
+    if cls in ("tidy", "all"):
+        for ctx, inbox in pairs:
+            i = pathlib.Path(inbox)
+            for line in [l for l in (i.read_text().splitlines() if i.exists() else []) if l.startswith("- ")]:
+                out.append({"id": "t{}".format(len(out) + 1), "action": "remove", "file": _rel(inbox), "target_text": line,
+                            "summary": "The inbox note was filed into the context, so it is cleared.",
+                            "evidence": [{"source": "memory:" + _rel(inbox), "quote": line}], "refs": [], "confidence": "high"})
+    if out and os.environ.get("MOCK_HUNT_BADQUOTE"):
+        out[0]["evidence"] = [{"source": "session:" + str(sid), "quote": "words that were never said"}]
+    if out and os.environ.get("MOCK_HUNT_BADREF"):
+        out[0]["refs"] = [{"repo": "nope", "path": "infra/missing.tf", "line": 3}]
+    if out and os.environ.get("MOCK_HUNT_BADLINE") and pairs:
+        root = re.search(r"- \S+ \((/[^)]+)\): context", prompt)
+        out[0]["refs"] = [{"repo": pathlib.Path(root.group(1)).name if root else "x", "path": "main.tf", "line": 99}]
+    if os.environ.get("MOCK_HUNT_OUTSCOPE") and group == "general":
+        out.append({"id": "o1", "action": "add", "file": "memory/clients/acme/context.md", "section": "## Notes",
+                    "new_text": "- Acme fact found in a general session", "summary": "This belongs to Acme, so you decide.",
+                    "evidence": [{"source": "session:" + sid, "quote": quote}], "refs": [], "confidence": "high"})
+    if os.environ.get("MOCK_HUNT_BADSCHEMA") and out:
+        out[0]["action"] = "rewrite"
+    reply({"findings": out})
+
+if prompt.startswith("VALIDATE"):
+    fpath = re.search(r"Findings to check: (\S+)", prompt).group(1)
+    fs = json.loads(pathlib.Path(fpath).read_text())["findings"]
+    how = os.environ.get("MOCK_VALIDATE", "")
+    vs = []
+    for k, f in enumerate(fs):
+        v = {"id": f["id"], "verdict": "upheld", "reason": "Nothing newer says otherwise.", "quote": f["evidence"][0]["quote"], "source": f["evidence"][0]["source"]}
+        if k == 0 and how == "refute":
+            v.update(verdict="refuted", reason="A later session says the opposite.")
+        if k == 0 and how == "refute_noquote":
+            v.update(verdict="refuted", reason="I think this is wrong.", quote="text that is nowhere")
+        if how == "unsure":
+            v.update(verdict="unsure")
+        vs.append(v)
+    if how == "missing":
+        vs = vs[1:]
+    reply({"verdicts": vs}, 0.02)
+
+if prompt.startswith("VERIFY"):
+    cpath = re.search(r"Proposed changes: (\S+)", prompt).group(1)
+    cs = json.loads(pathlib.Path(cpath).read_text())["changes"]
+    assert all("summary" not in c and "confidence" not in c for c in cs), "the verifier must not see the hunter's reasoning"
+    how = os.environ.get("MOCK_VERIFY", "")
+    out = []
+    for k, c in enumerate(cs):
+        v = {"id": c["id"], "verdict": "confirm", "reason": "The session says this."}
+        if k == 0 and how == "reject":
+            v.update(verdict="reject", reason="The source does not say this.")
+        if how == "unsure":
+            v.update(verdict="unsure", reason="Hard to tell.")
+        out.append(v)
+    reply({"checks": out}, 0.02)
 
 if prompt.startswith("MAP REPO"):
     if mode == "mapfail":

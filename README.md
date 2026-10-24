@@ -139,14 +139,30 @@ A cycle reads your current memory and your recent sessions, and writes an update
 a git branch (`cycle/<id>`). Your current memory is not touched until you adopt the copy; discard
 it and nothing changes.
 
-The prompt asks Claude for five things, in order: verify what memory says against the sessions,
-merge duplicates and inbox notes, replace what is stale or contradicted, reorganize, and surface
-insights. It writes a report and a decisions file.
+Each client goes through six stages, so nothing grades its own work:
 
-**Decisions and confidence.** Every change comes with a type (verified, merged, replaced,
-reorganized, insight, new), a confidence (high, medium, low) and the sessions or commits behind it.
-Low-confidence changes are held back and become questions. A changed file without a decision is
-flagged.
+| Stage | Who | What it does |
+|---|---|---|
+| **Recon** | code | Writes down what you did: each session's day, repo, your first message and the files it changed, plus the commits. Hunters read this first; the Review page shows it as "What you did". |
+| **Hunt** | read-only Claude runs, one per kind | Separate searches for stale or contradicted facts, new facts, your corrections and preferences, and tidying (filing inbox notes, duplicates). They report findings as JSON with exact quotes; they never edit. A search with nothing to look at is skipped. |
+| **Check** | code | Every finding's format, that the text it changes is really in the file, every quote word for word in the session, commit or file it names, and every file, line and function it names in the repo. Anything that fails is dropped with the reason. |
+| **Disprove** | a read-only Claude run | Tries to break each finding: newer evidence, a quote that does not say what the summary claims, something memory already has, another client's fact. A refutation must quote its own source, or the finding becomes a question. |
+| **Fresh check** | a new Claude run | Sees only the proposed change and its sources, not the summaries or the reasoning, and confirms or rejects it. |
+| **Apply** | code | Applies what survived, adds "(as of date)" to context lines, and writes the report. Low confidence, a "not sure" from either check, or a change for another part of memory becomes a question. |
+
+On a light night (1 or 2 small sessions in a client) one combined search replaces the separate ones
+and the disprove step is skipped; the checks and the fresh check still run. Hunters, checks and the
+fresh check only read, so a client's sessions never cause an edit outside the code-driven apply step.
+
+Cost: the full pipeline is several Claude runs per client instead of one. Set a cheaper **model for
+the checks** in Settings (they only read and compare), or switch **Pipeline** to "One pass" for a
+single run per client that edits memory directly, without the independent checks.
+
+**Reading the result.** Each change says in plain words what it does and why, where it goes ("the
+shop context", "your notes on terraform"), and the moments behind it: the day, the repo and what you
+asked. Ticks show which checks it passed. Ids and file paths are under Details. "Checked and dropped"
+lists what did not survive and why. Accepting a question saves it straight to memory when nothing
+else is waiting.
 
 **Dates.** Every input carries its time. Lines in a context file end with "(as of YYYY-MM-DD)".
 A newer line is never replaced by an older session or commit. Outdated evidence is dropped only
@@ -230,6 +246,11 @@ Claude account sign-in. **Check** runs a one-line test through your Claude Code.
 | `context_max_chars` | `7000` | Target size of a repo context |
 | `remap_after_commits` | `40` | Suggest Re-map after this many commits |
 | `stream_events` | `true` | Live event stream from Claude Code |
+| `pipeline` | `staged` | `staged` = recon, hunt, check, disprove, fresh check, apply. `single` = one run per client |
+| `hunters` | all four | Kinds of change searched for separately: `stale`, `new`, `corrections`, `tidy` |
+| `hunt_model` / `check_model` | `""` | Models for the searches and for the checks. Empty = the cycle model |
+| `small_night_kb` | `40` | At or below this much session text (1 or 2 sessions), one combined search and no disprove step |
+| `max_engines` | `4` | Claude runs at the same time across all clients |
 | `ui_port` | `4747` | Review page port |
 
 Cost: each client with sessions that day is one engine run. Cost and turns per run are shown in the
@@ -291,6 +312,19 @@ MOCK_STEP_DELAY=1 tests/run.sh /tmp/somna-test 4800 test_e2e.py
 `tests/run.sh <workdir> <port> <test file>` installs Somna into `<workdir>/home`, starts the page on
 `<port>` and runs the test. Every client, repo and session in the tests is fictional. See
 [tests/README.md](tests/README.md) for the options and what each suite covers.
+
+## Coming from agent-memory-kit
+
+If you ran the earlier version of this tool (the `dream` command in `~/agent-memory`), adopt or
+discard anything waiting there, then:
+
+```bash
+scripts/migrate-from-agent-memory.sh --ui-at-login
+```
+
+It stops the old jobs and hooks, copies your memory with its full git history to `~/somna`, carries
+over your settings, repos, clients and which sessions were already read, and installs Somna on top.
+The old folder stays as a backup.
 
 ## Uninstall
 

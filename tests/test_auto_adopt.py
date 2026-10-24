@@ -191,7 +191,7 @@ async def ui():
         rr = json.load(open(M + "/cycles/" + auto2["id"] + "/cycle.json"))
         check("UI Undo from the summary", bool(rr["review"].get("undone_at")), rr["review"])
         await pg.click('[data-sum="seen"]'); await pg.wait_for_timeout(900)
-        check("UI Got it clears the automatic part", "Saved automatically" not in (await pg.inner_text("main")).split("Decisions")[0])
+        check("UI Got it clears the automatic part", "Saved automatically" not in (await pg.inner_text("main")).split("Sessions read")[0])
         await pg.click('nav button[data-tab="settings"]'); await pg.wait_for_timeout(900)
         check("UI review mode in Settings", "Adopt automatically when safe" in await pg.inner_html("#f_review_mode"))
         await pg.click('nav button[data-tab="review"]'); await pg.wait_for_timeout(500)

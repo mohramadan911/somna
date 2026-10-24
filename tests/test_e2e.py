@@ -119,7 +119,10 @@ async def main():
         # F. map and adopt
         await pick_repo("acme-shop")
         await pg.click("#rMap")
-        await pg.wait_for_timeout(700)
+        for _ in range(25):
+            await pg.wait_for_timeout(200)
+            if "read-only" in (await pg.inner_text("#dInfo")):
+                break
         check("F dock explains the map", "read-only" in (await pg.inner_text("#dInfo")))
         check("F map finished", await wait_job())
         await pg.click("#dOpen"); await pg.wait_for_timeout(900)
@@ -163,7 +166,7 @@ async def main():
         if await pg.is_visible("#dOpen"):
             await pg.click("#dOpen"); await pg.wait_for_timeout(900)
         t = await main_t()
-        check("I review shows decisions, held changes and try", "Decisions" in t and "held, not in the proposal" in t and "Try it before adopting" in t, t[:300])
+        check("I review shows decisions, held changes and try", "Waiting for you" in t and "Try it before adopting" in t, t[:300])
         await pg.locator('[data-dec="accept"]').first.click(); await pg.wait_for_timeout(900)
         queued = [d for d in recs()[-1]["decisions"] if d.get("accepted_at")]
         check("I accepted change queued in an inbox", queued and "[owner accepted" in open(M + "/" + queued[0]["accepted_to"]).read(), queued)
