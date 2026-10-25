@@ -240,6 +240,19 @@ textarea.small{min-height:96px}
 .dc .why{font-size:13px;color:var(--gold-ink)} .dc .gonewhy{font-size:13px;color:var(--muted)}
 .dc .qa{display:flex;flex-wrap:wrap;gap:8px} .dc .btn{min-height:34px;padding:0 12px;font-size:13px}
 .dc details.tech summary{cursor:pointer;font-size:12.5px;color:var(--dim)} .dc details.tech pre{font:12px/1.5 var(--mono);white-space:pre-wrap;word-break:break-all;margin:6px 0 0;color:var(--muted)}
+#ask{position:fixed;top:0;right:0;bottom:0;width:min(460px,100vw);z-index:8;display:flex;flex-direction:column;border-radius:18px 0 0 18px;background:var(--glass-2)}
+#ask .ask-h{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid var(--glass-line)} #ask .ask-h .sub{flex:1;font-size:12px}
+#ask .ask-log{flex:1;overflow:auto;padding:14px 16px;display:flex;flex-direction:column;gap:12px}
+#ask .me{align-self:flex-end;max-width:88%;padding:9px 12px;border-radius:14px 14px 4px 14px;background:var(--indigo);color:#fff;font-size:14px;white-space:pre-wrap}
+#ask .bot{max-width:100%;padding:10px 12px;border-radius:14px 14px 14px 4px;background:var(--line-2);font-size:14px} #ask .bot p{margin:0 0 6px}
+#ask .meta{font-size:11.5px;color:var(--dim);margin-top:4px} #ask .cite{display:inline-block;font:11.5px var(--mono);color:var(--muted);margin:4px 6px 0 0}
+#ask .act{margin-top:8px;padding:10px;border-radius:12px;border:1px solid var(--glass-line);background:var(--glass)} #ask .act .t{font-weight:600;font-size:13.5px;margin-bottom:4px}
+#ask .act .btn{min-height:34px;font-size:13px;margin-top:8px} #ask .act .done{font-size:13px;color:var(--add-fg);margin-top:6px}
+#ask .ask-focus{margin:0 16px;padding:6px 10px;border-radius:10px;background:var(--chip);font-size:12.5px;display:flex;gap:8px;align-items:center}
+#ask .ask-log{min-height:0} #ask .ask-f{flex:none;align-items:flex-end;display:flex;gap:8px;padding:12px 16px 16px;border-top:1px solid var(--glass-line)} #ask .ask-f .btn{flex:none} #ask textarea{flex:1;resize:none;height:64px;min-height:0;max-height:160px;font:inherit;font-size:14px;padding:8px 10px;border-radius:12px;border:1px solid var(--glass-line);background:var(--glass);color:var(--text)}
+#ask .chips{display:flex;flex-wrap:wrap;gap:6px} #ask .chips button{font-size:12.5px;padding:6px 10px;border-radius:999px;border:1px solid var(--glass-line);background:var(--chip);color:var(--text);cursor:pointer}
+.sev{display:inline-block;font-size:11.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;padding:2px 8px;border-radius:999px}
+.sev.critical,.sev.high{background:var(--del-bg);color:var(--del-fg)} .sev.medium{background:var(--warn-bg);color:var(--gold-ink)} .sev.low,.sev.informational{background:var(--chip);color:var(--muted)}
 .dayh{margin:14px 2px 2px;font-size:13px;font-weight:650;color:var(--muted);letter-spacing:.02em}
 .did{display:flex;flex-direction:column;gap:6px;margin-top:8px} .did .s{font-size:14px} .did .s small{color:var(--dim)}
 .pipe{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12.5px;margin-top:8px}
@@ -292,6 +305,7 @@ textarea.small{min-height:96px}
   <div class="brand"><svg class="mark" viewBox="90 80 340 300" width="30" height="26" aria-hidden="true"><g transform="translate(14 36)"><path d="M112.0 170.0 L148.9 170.0 L148.9 240.4 L185.7 240.4 L185.7 284.4 L222.6 284.4 L222.6 346.0 L259.4 346.0 L259.4 214.0 L296.3 214.0 L296.3 284.4 L333.1 284.4 L333.1 170.0 L370.0 170.0" fill="none" stroke="#F2C94C" stroke-width="22" stroke-linejoin="round" stroke-linecap="round"/><circle cx="392.0" cy="112.0" r="30" fill="#E8E2C9"/></g></svg><b>somna</b><span>memory that rests overnight</span><small>127.0.0.1 · this Mac only · v__SOMNA_VERSION__</small></div>
   <div class="hdr-right">
     <button id="pendingPill" class="pill" type="button" hidden title="Open the proposal waiting for review"><span class="dot"></span><span id="pendingText"></span></button>
+    <button id="askBtn" class="btn ghost" type="button" aria-expanded="false" aria-controls="ask">Ask Somna</button>
     <button id="runBtn" class="btn ghost" type="button">Run cycle now</button><button class="hq" type="button" data-help="run" aria-label="What does Run cycle now do?">?</button>
     <button id="helpBtn" class="btn ghost" type="button">Help</button>
   </div>
@@ -348,6 +362,14 @@ textarea.small{min-height:96px}
   </section>
 </div>
 <div id="pop" class="glass" role="dialog" hidden></div>
+<aside id="ask" class="glass" hidden aria-label="Ask Somna">
+  <div class="ask-h"><strong>Ask Somna</strong><button class="hq" type="button" data-help="ask" aria-label="What is Ask Somna?">?</button><span class="sub" id="askScope"></span>
+    <button class="btn link" type="button" id="askClear">Clear</button><button class="btn link" type="button" id="askClose">Close</button></div>
+  <div id="askLog" class="ask-log" aria-live="polite"></div>
+  <div class="ask-focus" id="askFocus" hidden></div>
+  <form id="askForm" class="ask-f"><textarea id="askQ" rows="2" maxlength="4000" aria-label="Your question" placeholder="Ask about your memory, a change, a cycle or a setting"></textarea>
+    <button class="btn primary" type="submit" id="askSend">Ask</button></form>
+</aside>
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -393,6 +415,8 @@ const HELP = {
   run_digest_budget_kb: ["Reading budget per client run", "How much session text Claude reads in one client run. Small sessions are read in full first, then the big ones share what is left. 400 KB is about 100k tokens."],
   session_max_kb: ["Most one session can take", "The most of the budget a single session may use, so one very long session cannot crowd out the rest. Above this it is shortened: tool calls and long output first, your words and Claude's answers last. The full text stays available to Claude."],
   stale_after_days: ["Clean up current state after", "The cycle removes \"Current state\" items whose as-of date is older than this, unless newer sessions or commits confirm them. Git keeps the history."],
+  ask: ["Ask Somna", "A chat about your memory, your cycles and your settings. Code decides what it may read: your general notes always, a client's files only when the question or the item you have open is about that client. It has no file tools and changes nothing itself. A suggested change comes with a button: settings are checked like on this page, memory changes go through the same checks as a cycle's findings and are saved under the memory lock. Conversations stay on this Mac (chat/history.jsonl) until you clear them. Each question is one Claude Code call, on a small model by default."],
+  audit: ["Security audit", "The same staged shape as a cycle, for code. Recon maps the attack surface and picks attack classes. One read-only search per class reports findings with exact code quotes. Code checks every path, line number, function and quote. A second run tries to disprove each finding, and a fresh agent that only sees the locations and conditions confirms it. Confirmed means it passed all of that; needs validation means a check was not sure. Nothing is run or changed. Save to memory adds confirmed findings to the repo's context under Security findings, so every later session there knows about them, and a nightly cycle only removes one when a commit or session shows it was fixed. Only audit code you are allowed to test."],
   pipeline: ["How changes are checked", "Full: code first writes down what you did. Then separate searches look for stale facts, new facts, your corrections and tidying. Code checks every quote word for word against your sessions and every file, line and function against the repo. Another run tries to disprove each finding, and a fresh agent that never saw the reasoning confirms it. Only changes that pass all of that are saved; doubtful ones become questions. It costs several Claude runs per client instead of one. One pass: a single run per client edits memory directly, cheaper, and nothing checks it independently."],
   hunt_model: ["Model for finding changes", "Used by the searches that look for changes. Empty uses the cycle model."],
   check_model: ["Model for the checks", "Used by the disprove step and the fresh check. A cheaper model like Haiku or Sonnet keeps cost down; they only read and compare. Empty uses the cycle model."],
@@ -415,6 +439,7 @@ const DOCK_INFO = {
   cycle: "Reading your sessions and curating each client in its own copy of memory. Usually 2 to 6 minutes. You can close this page; nothing changes until you adopt.",
   map: "Reading the repo with read-only tools to write its context file. Usually 1 to 3 minutes. The repo is not changed.",
   scan: "Reading session files to find your repos. No Claude call, no cost.",
+  audit: "Reading the code with read-only tools: attack surface first, then one search per attack class. Every finding is checked by code, attacked by a second run and confirmed by a fresh one. Nothing is changed or saved until you choose.",
 };
 function hq(key) { return '<button class="hq" type="button" data-help="' + key + '" aria-label="Help: ' + esc((HELP[key] || [key])[0]) + '">?</button>'; }
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -481,7 +506,7 @@ function badge(d) {
   if (d.undone) return '<span class="badge b-muted">Undone</span>';
   if (d.auto && d.decision === "adopted") return '<span class="badge b-adopted">Saved automatically</span>';
   const map = { adopted: ["b-adopted", "Adopted"], discarded: ["b-muted", "Discarded"], no_changes: ["b-muted", "No changes"],
-    nothing_to_do: ["b-muted", "No new sessions"], dry_run: ["b-muted", "Scan"] };
+    nothing_to_do: ["b-muted", "No new sessions"], dry_run: ["b-muted", "Scan"], audited: ["b-adopted", "Done"] };
   const m = map[d.decision] || ["b-muted", d.status];
   return '<span class="badge ' + m[0] + '">' + esc(m[1]) + "</span>";
 }
@@ -549,7 +574,7 @@ function summaryBanner() {
       '<button class="btn" type="button" data-sum="undo" data-id="' + esc(M.auto[0].id) + '">Undo</button>' + hq("undo") + "</div>";
   }
   (M.failed || []).forEach((b) => {
-    h += '<div class="sumrow"><span class="badge b-failed">Failed</span><span class="t">' + esc((b.type === "map" ? "A map" : "A cycle") + " failed: " + b.why) + '</span><button class="btn" type="button" data-sum="open" data-id="' + esc(b.id) + '">Open it</button></div>';
+    h += '<div class="sumrow"><span class="badge b-failed">Failed</span><span class="t">' + esc((b.type === "map" ? "A map" : b.type === "audit" ? "A security audit" : "A cycle") + " failed: " + b.why) + '</span><button class="btn" type="button" data-sum="open" data-id="' + esc(b.id) + '">Open it</button></div>';
   });
   M.blocked.forEach((b) => {
     h += '<div class="sumrow"><span class="badge b-review">Waiting for you</span><span class="t">' + esc(b.why.join("; ")) + '</span><button class="btn primary" type="button" data-sum="open" data-id="' + esc(b.id) + '">Review it</button></div>';
@@ -611,6 +636,7 @@ function decCard(d, o) {
   if (d.accepted_at) h += '<div class="gonewhy">' + (d.applied_directly ? "Accepted and saved to " + esc(friendly(d.accepted_to)) + "." : "Accepted. The next cycle files it in " + esc(friendly(d.accepted_to)) + ".") + "</div>";
   if (d.dismissed_at && !d.dropped) h += '<div class="gonewhy">Dismissed.</div>';
   if (o.actions && open) h += '<div class="qa">' + o.actions + "</div>";
+  if (o.cycle) h += '<div><button class="btn link" type="button" style="padding:0;min-height:24px;font-size:12.5px" data-askc="' + esc(o.cycle) + '" data-aski="' + (o.index != null ? o.index : d.i) + '">Ask about this</button></div>';
   h += '<details class="tech"><summary>Details</summary><pre>' + esc(["file: " + d.file, "type: " + d.type + (d.action ? " (" + d.action + ")" : ""),
     "confidence: " + d.confidence, "evidence: " + ((d.evidence || []).join(", ") || "none"),
     d.evidence_newest ? "newest evidence: " + d.evidence_newest : "", d.target_updated ? "file last updated: " + d.target_updated : "",
@@ -640,7 +666,7 @@ async function viewQuestions(keep) {
   let Q;
   try { Q = (await api("/api/questions")).questions; } catch (e) { paint('<div class="banner bad">' + esc(e.message) + "</div>", keep); return; }
   if (S.tab !== "questions") return;
-  const rows = Q.map((d) => decCard(d, { actions:
+  const rows = Q.map((d) => decCard(d, { cycle: d.cycle, index: d.index, actions:
     '<button class="btn primary" type="button" data-qa="accept" data-id="' + esc(d.cycle) + '" data-i="' + d.index + '">Accept → ' + esc(d.accept_where || friendly(d.accept_to)) + "</button>" +
     '<button class="btn" type="button" data-qa="dismiss" data-id="' + esc(d.cycle) + '" data-i="' + d.index + '">Dismiss</button>' +
     '<button class="btn link" type="button" data-qa="open" data-id="' + esc(d.cycle) + '">Open its cycle</button>' +
@@ -673,7 +699,8 @@ function viewReview(keep) {
   const tk = (r.usage && r.usage.tokens) || null, ktok = tk ? fmtTok((tk.input_tokens || 0) + (tk.cache_read_input_tokens || 0) + (tk.cache_creation_input_tokens || 0) + (tk.output_tokens || 0)) : "";
   const changed = D.memory_changed_since || [], dirty = D.memory_dirty || [];
   const opts = S.data.cycles.slice(0, 40).map((d) => '<option value="' + esc(d.id) + '"' + (d.id === s.id ? " selected" : "") + ">" +
-    esc(fmtTime(d.created_at) + " · " + (d.type === "map" ? "map " + ((d.repo || {}).name || "") + " · " : "") + (d.needs_review ? "waiting" : (d.decision || d.status))) + "</option>").join("");
+    esc(fmtTime(d.created_at) + " · " + (d.type === "map" ? "map " + ((d.repo || {}).name || "") + " · " : d.type === "audit" ? "security audit " + ((d.repo || {}).name || "") + " · " : "") + (d.needs_review ? "waiting" : (d.decision || d.status))) + "</option>").join("");
+  if (s.type === "audit") return auditView(D, keep, opts);
   const title = s.type === "map" ? "Repo context for " + esc((s.repo || {}).name || "") : (s.needs_review ? "Cycle waiting for review" : "Cycle");
   let h = summaryBanner() + '<div class="row between"><div><p class="sub">' + esc(fmtTime(r.created_at)) + (r.ended_at ? " → " + esc(fmtTime(r.ended_at).split(", ").pop()) : "") +
     "</p><h1>" + title + " " + badge(s) + '</h1></div><label class="row pick" style="gap:8px"><span class="sub">Show</span><select id="cycleSel">' + opts + "</select></label></div>";
@@ -743,13 +770,13 @@ function viewReview(keep) {
     const acts = (d) => s.needs_review !== undefined ? '<button class="btn primary" type="button" data-dec="accept" data-i="' + d.i + '">Accept → ' + esc(d.accept_where || friendly(d.accept_to)) + "</button>" +
       '<button class="btn" type="button" data-dec="dismiss" data-i="' + d.i + '">Dismiss</button>' : "";
     if (openQ.length) h += '<section class="glass card"><h2>Waiting for you' + hq("questions_tab") + '</h2><p class="sub" style="margin:4px 0 0">Not saved. Accept the ones that are right.</p><div class="decs">' +
-      openQ.map((d) => decCard(d, { actions: acts(d) })).join("") + "</div></section>";
+      openQ.map((d) => decCard(d, { actions: acts(d), cycle: s.id })).join("") + "</div></section>";
     if (rest.length) h += '<section class="glass card"><div class="row between"><h2>What changed' + hq("decisions") + '</h2><span class="sub">newest first, by the day of its evidence</span></div>' +
-      groupByDay(rest.map((d) => d.evidence_newest ? d : Object.assign({}, d, { evidence_newest: String(r.created_at || "").slice(0, 10) })).sort((a, b) => String(b.evidence_newest).localeCompare(String(a.evidence_newest)))).map((grp) => (grp.k ? '<div class="dayh">' + esc(dayName(grp.k)) + "</div>" : '<div class="dayh">No date</div>') + '<div class="decs">' + grp.items.map((d) => decCard(d)).join("") + "</div>").join("") + "</section>";
+      groupByDay(rest.map((d) => d.evidence_newest ? d : Object.assign({}, d, { evidence_newest: String(r.created_at || "").slice(0, 10) })).sort((a, b) => String(b.evidence_newest).localeCompare(String(a.evidence_newest)))).map((grp) => (grp.k ? '<div class="dayh">' + esc(dayName(grp.k)) + "</div>" : '<div class="dayh">No date</div>') + '<div class="decs">' + grp.items.map((d) => decCard(d, { cycle: s.id })).join("") + "</div>").join("") + "</section>";
   }
   if (dropped.length) {
     h += '<details class="glass card"><summary><strong>Checked and dropped</strong>' + hq("dropped") + ' <span class="sub">' + dropped.length + " finding" + (dropped.length === 1 ? "" : "s") +
-      " that did not pass a check, with the reason</span></summary><div class=\"decs\">" + dropped.map((d) => decCard(d)).join("") + "</div></details>";
+      " that did not pass a check, with the reason</span></summary><div class=\"decs\">" + dropped.map((d) => decCard(d, { cycle: s.id })).join("") + "</div></details>";
   }
   if (r.status === "completed" || r.status === "failed") {
     h += '<div class="cols"><section class="glass card md"><h2 style="margin-bottom:8px">Report</h2>' + md(D.report) + "</section>" +
@@ -806,7 +833,7 @@ async function act(kind, id, btn) {
 /* ---------- History ---------- */
 function viewHistory(keep) {
   const rows = S.data.cycles.map((d) => '<tr class="click" data-id="' + esc(d.id) + '" tabindex="0"><td>' + esc(fmtTime(d.created_at)) + '</td><td class="mono">' +
-    esc(d.type === "map" ? "map · " + ((d.repo || {}).name || "") : d.id) + "</td><td>" + (d.type === "map" ? "" : d.sessions) + "</td><td>" + esc(d.error || d.diffstat || d.note || "") + "</td><td>" + badge(d) + "</td></tr>").join("");
+    esc(d.type === "map" ? "map · " + ((d.repo || {}).name || "") : d.type === "audit" ? "security audit · " + ((d.repo || {}).name || "") : d.id) + "</td><td>" + (d.type === "map" ? "" : d.sessions) + "</td><td>" + esc(d.error || d.diffstat || d.note || "") + "</td><td>" + badge(d) + "</td></tr>").join("");
   paint('<h1>History</h1><div class="glass scroll" style="padding:0">' +
     (rows ? "<table><thead><tr><th>When</th><th>Run</th><th>Sessions</th><th>What changed</th><th>Status</th></tr></thead><tbody>" + rows + "</tbody></table>"
       : '<p class="sub" style="padding:20px">Nothing yet.</p>') +
@@ -969,6 +996,11 @@ async function viewRepos(keep) {
       (sel.inbox_path ? '<button class="btn" type="button" id="rInbox">Open inbox (' + (sel.inbox_lines || 0) + ")</button>" + hq("inbox") : "") +
       (lastMap ? '<button class="btn link" type="button" id="rLast">Last map: ' + esc(lastMap.needs_review ? "waiting for review" : (lastMap.decision || lastMap.status)) + "</button>" : "") + "</div></section>";
     if (sel.status === "confirmed" && sel.client) {
+      const lastAudit = S.data.cycles.find((d) => d.type === "audit" && d.repo && d.repo.path === sel.path) || null;
+      det += '<section class="glass card"><h2 style="margin-bottom:6px">Security audit' + hq("audit") + '</h2><p class="sub" style="margin-bottom:12px">Reads the code with read-only tools: maps the attack surface, hunts one attack class at a time, checks every finding by code, tries to disprove it and has a fresh agent confirm it. Nothing in the repo or memory changes; you choose what to save. Only audit code you are allowed to test.</p><div class="row">' +
+        '<button class="btn" type="button" id="rAudit"' + (running ? " disabled" : "") + ">Run security audit</button>" +
+        (lastAudit ? '<button class="btn link" type="button" data-q="review" data-cycle="' + esc(lastAudit.id) + '">Last audit: ' + esc(fmtTime(lastAudit.created_at)) + " · " + esc(lastAudit.diffstat || lastAudit.status) + "</button>" : "") +
+        '<button class="btn link" type="button" data-askrepo="' + esc(sel.path) + '">Ask about this repo</button></div></section>';
       det += '<section class="glass card"><h2 style="margin-bottom:6px">Instructions for agents' + hq("instructions") + '</h2><p class="sub" style="margin-bottom:10px">Placed in front of the context when a Claude Code session starts here. Tell agents how to use it. Up to 4,096 characters each.</p>' +
         '<label class="fl" for="riRepo"><span>For this repo</span><span class="sub">' + esc(sel.name) + "</span></label>" +
         '<textarea id="riRepo" class="small" maxlength="4096" placeholder="For example: Use envs/ for anything per account. Ask before touching modules/net.">' + esc(sel.instructions || "") + "</textarea>" +
@@ -995,6 +1027,10 @@ async function viewRepos(keep) {
     try { const j = await api("/api/assign", { path: sel.path, client: c, name: $("#rName").value.trim() }); toast(j.message); S.files = null; await loadRepos(); viewRepos(true); } catch (err) { toast(err.message, true); }
   });
   $("#rNewClient").onclick = () => { S.showClientForm = true; viewRepos(true); window.scrollTo({ top: 0, behavior: "smooth" }); };
+  if ($("#rAudit")) $("#rAudit").onclick = (e) => {
+    if (!confirm("Run a security audit of " + sel.name + "?\n\nOnly audit code you are allowed to test. It reads the code (nothing is run or changed) and takes several Claude runs, each capped at the audit spend limit in Settings.")) return;
+    busy(e.currentTarget, async () => { try { const j = await api("/api/audit", { path: sel.path }); toast(j.message); S.dockHidden = false; await tick(); } catch (err) { toast(err.message, true); } });
+  };
   if ($("#rMap")) $("#rMap").onclick = (e) => busy(e.currentTarget, async () => {
     try { const j = await api("/api/map", { path: sel.path }); toast(j.message); S.dockHidden = false; await tick(); } catch (err) { toast(err.message, true); }
   });
@@ -1160,6 +1196,11 @@ async function viewSettings(keep) {
     '<label class="k" for="f_check_model">Model for the checks' + hq("check_model") + '</label><div class="v">' + modelPick("f_check_model", set.check_model) + "</div>" +
     numRow("small_night_kb", "Light night below", "KB of sessions: one combined search and no disprove step when there are 1 or 2 small sessions") +
     numRow("max_engines", "Claude runs at the same time", "runs") + "</div></section>";
+  h += '<section class="glass card"><h2 style="margin-bottom:12px">Ask Somna and security audits</h2><div class="set">' +
+    '<label class="k" for="f_chat_model">Model for Ask Somna' + hq("ask") + '</label><div class="v">' + modelPick("f_chat_model", set.chat_model) + "</div>" +
+    '<label class="k" for="f_audit_model">Model for audits' + hq("audit") + '</label><div class="v">' + modelPick("f_audit_model", set.audit_model) + "</div>" +
+    '<label class="k" for="f_audit_check_model">Model for audit checks</label><div class="v">' + modelPick("f_audit_check_model", set.audit_check_model) + "</div>" +
+    numRow("audit_max_budget_usd", "Spend cap per audit run", "US$ per Claude run in an audit") + numRow("audit_max_classes", "Attack classes per audit", "classes") + "</div></section>";
   h += '<section class="glass card"><h2 style="margin-bottom:12px">Limits and cost</h2><div class="set">' +
     numRow("max_budget_usd", "Spend cap per run", "US$ · empty = no cap", "no cap") + numRow("map_max_budget_usd", "Spend cap per map", "US$ · empty = no cap", "no cap") +
     numRow("max_turns", "Turn limit per run", "turns · empty = no limit", "no limit") + numRow("timeout_minutes", "Time limit per run", "minutes") +
@@ -1194,6 +1235,7 @@ async function viewSettings(keep) {
     const settings = {};
     document.querySelectorAll("#main [data-key]").forEach((el) => { settings[el.dataset.key] = el.type === "checkbox" ? el.checked : (el.value === "" ? null : (el.type === "number" ? Number(el.value) : el.value)); });
     settings.model = $("#f_model").value === "__custom" ? "" : $("#f_model").value; settings.map_model = $("#f_map_model").value === "__custom" ? "" : $("#f_map_model").value; settings.hunt_model = $("#f_hunt_model").value === "__custom" ? "" : $("#f_hunt_model").value; settings.check_model = $("#f_check_model").value === "__custom" ? "" : $("#f_check_model").value;
+    ["chat_model", "audit_model", "audit_check_model"].forEach((k) => { const v = $("#f_" + k).value; settings[k] = v === "__custom" ? "" : v; });
     const schedule = { nightly: { enabled: $("#nOn").checked, time: $("#nTime").value, days: Array.from(document.querySelectorAll("[data-nday]")).filter((c) => c.checked).map((c) => +c.dataset.nday) },
       weekly: { enabled: $("#wOn").checked, day: +$("#wDay").value, time: $("#wTime").value, since_days: +$("#wDays").value, model: $("#wModel").value === "__custom" ? "" : $("#wModel").value, instructions: $("#wInstr").value } };
     try { const j = await api("/api/settings", { settings: settings, schedule: schedule }); toast(j.message); S.settingsDirty = false; await loadSettings(); S.setup = null; await loadSetup(); renderHeader(); viewSettings(true); $("#setState").textContent = "Saved."; }
@@ -1201,12 +1243,138 @@ async function viewSettings(keep) {
   });
 }
 
+/* ---------- Ask Somna ---------- */
+S.ask = { open: false, focus: null, entries: null, busy: false };
+function askFocusLabel(f) {
+  if (!f) return "";
+  if (f.repo) return "About the repo " + String(f.repo).split("/").pop();
+  if (f.cycle && f.index != null) return "About a change in this cycle";
+  if (f.cycle) return "About this cycle";
+  return "";
+}
+async function openAsk(focus, prefill) {
+  S.ask.open = true; S.ask.focus = focus || null;
+  $("#ask").hidden = false; $("#askBtn").setAttribute("aria-expanded", "true");
+  if (!S.ask.entries) { try { S.ask.entries = (await api("/api/chat")).entries; } catch (e) { S.ask.entries = []; } }
+  renderAsk();
+  const q = $("#askQ"); if (prefill != null) q.value = prefill; q.focus();
+}
+function closeAsk() { S.ask.open = false; $("#ask").hidden = true; $("#askBtn").setAttribute("aria-expanded", "false"); }
+function actHtml(e, a) {
+  let h = '<div class="act">';
+  if (a.type === "settings") h += '<div class="t">Change settings</div>' + a.changes.map((c) => '<div class="mono" style="font-size:12.5px">' + esc(c.key) + ": " + esc(JSON.stringify(c.from)) + " → " + esc(JSON.stringify(c.to)) + "</div>").join("") + (a.why ? '<div class="sub" style="font-size:12.5px;margin-top:4px">' + esc(a.why) + "</div>" : "");
+  else if (a.type === "memory") h += '<div class="t">' + esc({ add: "Add to ", replace: "Change in ", remove: "Remove from " }[a.action] + a.where) + '</div><div class="sub" style="font-size:13px">' + esc(a.summary) + "</div>" +
+    '<div class="dc" style="padding:0;background:none"><div class="chg">' + (a.target_text ? a.target_text.split("\n").filter(Boolean).map((l) => '<div class="d">' + esc(l) + "</div>").join("") : "") +
+    (a.action !== "remove" && a.new_text ? a.new_text.split("\n").filter(Boolean).map((l) => '<div class="a">' + esc(l) + "</div>").join("") : "") + "</div></div>";
+  else if (a.type === "run") h += '<div class="t">Run a cycle now</div><div class="sub" style="font-size:13px">' + esc(a.sessions ? a.sessions.length + " chosen sessions" : a.since_hours ? "sessions from the last " + a.since_hours + " hours" : "sessions since the last cycle") + (a.instructions ? " · instructions: " + a.instructions : "") + "</div>";
+  else if (a.type === "steer") h += '<div class="t">Add a standing rule for every cycle</div><div class="sub" style="font-size:13px">' + esc(a.text) + "</div>";
+  if (a.status === "done") h += '<div class="done">✓ ' + esc(a.result || "Done") + "</div>";
+  else h += '<button class="btn primary" type="button" data-askact="' + esc(a.id) + '" data-askentry="' + esc(e.id) + '">' + ({ settings: "Save settings", memory: "Save to memory", run: "Start run", steer: "Add rule" }[a.type]) + "</button>";
+  return h + "</div>";
+}
+function renderAsk() {
+  if (!S.ask.open) return;
+  const E = S.ask.entries || [];
+  const chips = ["What do you know about my repos?", "What changed this week?", "Why did the last cycle cost what it did?", "Make nights cheaper", "Is anything wrong?"];
+  let h = E.length ? "" : '<div class="bot"><p>Ask about your memory, a change, a cycle or a setting. I only read Somna\'s records and your memory, and I never change anything myself: you get a button for each suggestion.</p></div><div class="chips">' +
+    chips.map((c) => '<button type="button" data-askchip="' + esc(c) + '">' + esc(c) + "</button>").join("") + "</div>";
+  h += E.map((e) => '<div class="me">' + esc(e.q) + "</div>" + '<div class="bot">' + md(e.answer) +
+    ((e.cites || []).length ? "<div>" + e.cites.map((c) => '<span class="cite">' + esc(String(c).replace(/^memory\//, "")) + "</span>").join("") + "</div>" : "") +
+    (e.actions || []).map((a) => actHtml(e, a)).join("") +
+    ((e.refused || []).length ? '<div class="meta">Left out ' + e.refused.length + " suggestion" + (e.refused.length === 1 ? "" : "s") + ": " + esc(e.refused.join("; ")) + "</div>" : "") +
+    '<div class="meta">' + (typeof e.cost_usd === "number" ? "$" + e.cost_usd.toFixed(3) + " · " : "") + (e.seconds != null ? e.seconds + " s · " : "") + "read: " + esc((e.sections || []).filter((x) => /memory|cycle|question|open|gets/i.test(x)).join(", ") || "settings and health") + "</div></div>").join("");
+  if (S.ask.busy) h += '<div class="bot"><p class="sub">Reading your memory…</p></div>';
+  $("#askLog").innerHTML = h; $("#askLog").scrollTop = $("#askLog").scrollHeight;
+  const fl = askFocusLabel(S.ask.focus);
+  $("#askFocus").hidden = !fl; $("#askFocus").innerHTML = fl ? esc(fl) + ' <button class="btn link" type="button" id="askUnfocus">clear</button>' : "";
+  if ($("#askUnfocus")) $("#askUnfocus").onclick = () => { S.ask.focus = null; renderAsk(); };
+  document.querySelectorAll("[data-askchip]").forEach((b) => b.onclick = () => { $("#askQ").value = b.dataset.askchip; sendAsk(); });
+  document.querySelectorAll("[data-askact]").forEach((b) => b.onclick = (ev) => busy(ev.currentTarget, async () => {
+    try {
+      const j = await api("/api/chat_action", { entry: b.dataset.askentry, action: b.dataset.askact }); toast(j.message);
+      S.ask.entries = (await api("/api/chat")).entries; renderAsk(); S.settings = null; await loadState(); renderHeader(); render(true);
+      if (/Cycle started|started/.test(j.message)) { S.dockHidden = false; await tick(); }
+    } catch (err) { toast(err.message, true); }
+  }));
+}
+async function sendAsk() {
+  const q = $("#askQ").value.trim();
+  if (!q) { toast("Type a question first", true); return; }
+  if (S.ask.busy) return;
+  S.ask.busy = true; S.ask.entries = (S.ask.entries || []).concat([{ id: "pending", q: q, answer: "", actions: [] }]); renderAsk();
+  $("#askQ").value = "";
+  try {
+    const j = await api("/api/ask", { question: q, focus: S.ask.focus, tab: S.tab });
+    S.ask.entries = S.ask.entries.filter((x) => x.id !== "pending").concat([j.entry]);
+  } catch (err) {
+    S.ask.entries = S.ask.entries.filter((x) => x.id !== "pending"); $("#askQ").value = q; toast(err.message, true);
+  }
+  S.ask.busy = false; renderAsk();
+}
+$("#askBtn").onclick = () => S.ask.open ? closeAsk() : openAsk(null);
+$("#askClose").onclick = closeAsk;
+$("#askClear").onclick = async () => { if (!confirm("Clear this conversation? It is only stored on this Mac.")) return; try { await api("/api/chat_clear", {}); S.ask.entries = []; renderAsk(); } catch (err) { toast(err.message, true); } };
+$("#askForm").onsubmit = (e) => { e.preventDefault(); sendAsk(); };
+$("#askQ").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendAsk(); } });
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-askc],[data-askrepo]");
+  if (!b) return;
+  if (b.dataset.askrepo) return openAsk({ repo: b.dataset.askrepo }, "What do you know about this repo, and what is still open?");
+  openAsk({ cycle: b.dataset.askc, index: b.dataset.aski != null && b.dataset.aski !== "" ? +b.dataset.aski : null }, b.dataset.aski != null && b.dataset.aski !== "" ? "Why is this here, and what should I do with it?" : "Explain this run in plain words.");
+});
+
+/* ---------- security audit view ---------- */
+function auditView(D, keep, opts) {
+  const r = D.record, s = D.summary, F = r.audit_findings || [], st = {}; (r.stages || []).forEach((x) => st[x.stage] = x);
+  const by = (k) => F.filter((f) => f.status === k);
+  const conf = by("confirmed"), nv = by("needs_validation"), rj = by("rejected");
+  const cost = r.usage && typeof r.usage.total_cost_usd === "number" ? "$" + r.usage.total_cost_usd.toFixed(2) : "n/a";
+  let h = summaryBanner() + '<div class="row between"><div><p class="sub">' + esc(fmtTime(r.created_at)) + (r.ended_at ? " → " + esc(fmtTime(r.ended_at).split(", ").pop()) : "") +
+    "</p><h1>Security audit of " + esc((r.repo || {}).name || "") + " " + badge(s) + "</h1></div>" +
+    '<div class="row" style="gap:8px"><button class="btn link" type="button" data-askc="' + esc(r.id) + '">Ask about this audit</button><label class="row pick" style="gap:8px"><span class="sub">Show</span><select id="cycleSel">' + (opts || "") + "</select></label></div></div>";
+  h += '<div class="tiles">' + tile("Confirmed", conf.length, "passed every check") + tile("Needs validation", nv.length, "a check was not sure") +
+    tile("Rejected", rj.length, "with the reason") + tile("Cost", cost, (r.usage && r.usage.num_turns ? r.usage.num_turns + " turns" : "")) + "</div>";
+  if (r.status === "running" || r.status === "pending") h += '<div class="banner info">Working on it. Follow the progress in the panel at the bottom right.</div>';
+  if (r.status === "failed") h += '<div class="banner bad"><strong>The audit failed.</strong> ' + esc(s.error || "") + (D.engine_log ? '<pre class="file" style="margin-top:10px;max-height:260px;overflow:auto">' + esc(D.engine_log) + "</pre>" : "") + "</div>";
+  if (r.warning) h += '<div class="banner bad">' + esc(r.warning) + "</div>";
+  if (r.stages && r.stages.length) h += '<div class="pipe">' + [
+    st.recon && "<span>Mapped the attack surface: " + ((r.attack_classes || []).map((c) => c.title).join(", ") || "default classes") + "</span>",
+    st.hunt && "<span>Hunted: " + (st.hunt.findings || 0) + " found" + ((st.hunt.failed || []).length ? ", " + st.hunt.failed.length + " search failed" : "") + "</span>",
+    st.check && "<span>Checked paths, lines and quotes: " + st.check.passed + " passed</span>",
+    st.validate && "<span>Tried to disprove: " + (st.validate.upheld || 0) + " held up</span>",
+    st.verify && "<span>Fresh check: " + (st.verify.confirmed || 0) + " confirmed</span>"].filter(Boolean).join("<i>→</i>") + "</div>";
+  const unsaved = conf.filter((f) => !f.saved_at);
+  if (r.status === "completed") h += '<div class="banner info"><div class="row between"><span>Nothing was changed in the repo or in memory. Save findings to the repo\'s context so future sessions there know about them.</span>' +
+    (unsaved.length ? '<button class="btn primary" type="button" id="aSaveAll">Save ' + unsaved.length + " confirmed to memory</button>" : "") + "</div></div>";
+  const card = (f) => '<div class="dc' + (f.status === "needs_validation" ? " held" : f.status === "rejected" ? " gone" : "") + '"><div class="top"><span class="sev ' + esc(f.severity) + '">' + esc(f.severity) + '</span><span class="kind">' + esc(f.title) +
+    '</span><span class="mono">' + esc(f.where || "") + "</span>" + (f.seen_in ? '<span class="badge b-muted">also in an earlier audit</span>' : "") + "</div>" +
+    (f.status !== "rejected" ? '<p class="plain">' + esc(f.description) + "</p>" + (f.conditions ? '<div class="evl"><b>Needs:</b> ' + esc(f.conditions) + "</div>" : "") +
+      (f.remediation ? '<div class="evl"><b>Fix:</b> ' + esc(f.remediation) + "</div>" : "") : '<div class="gonewhy">' + esc(f.rejected || "") + "</div>") +
+    ((f.checks || []).length ? '<div class="ck">' + f.checks.filter((c) => c.check !== "schema" || !c.ok).map((c) => '<span class="' + (c.ok ? "ok" : "no") + '">' + (c.ok ? "✓ " : "✗ ") + esc(c.detail) + "</span>").join("") + "</div>" : "") +
+    (f.status === "needs_validation" ? '<div class="why">Not confirmed: ' + esc([(f.validator || {}).verdict !== "upheld" ? "the disprove step was not sure" : "", (f.verifier || {}).verdict !== "confirmed" ? "the fresh check was not sure" : ""].filter(Boolean).join("; ")) + ".</div>" : "") +
+    (f.saved_at ? '<div class="gonewhy">Saved to memory.</div>' : f.status !== "rejected" && r.status === "completed" ? '<div class="qa"><button class="btn' + (f.status === "confirmed" ? " primary" : "") + '" type="button" data-afp="' + esc(f.fingerprint) + '">Save to memory</button></div>' : "") +
+    '<details class="tech"><summary>Details</summary><pre>' + esc(["class: " + f.class, "root cause: " + (f.root_cause || ""), "trace:"].concat((f.trace || []).map((t) => "  " + t.path + (t.line ? ":" + t.line : "") + (t.symbol ? " " + t.symbol : "") + (t.note ? ", " + t.note : "")))
+      .concat(["evidence:"]).concat((f.evidence || []).map((e) => "  " + e.path + (e.line ? ":" + e.line : "") + "  " + e.quote))
+      .concat([f.validator ? "disprove check: " + f.validator.verdict + ", " + f.validator.reason : "", f.verifier ? "fresh check: " + f.verifier.verdict + ", " + f.verifier.reason : "", "fingerprint: " + f.fingerprint]).filter(Boolean).join("\n")) + "</pre></details></div>";
+  if (conf.length) h += '<section class="glass card"><h2>Confirmed' + hq("audit") + '</h2><div class="decs">' + conf.map(card).join("") + "</div></section>";
+  if (nv.length) h += '<section class="glass card"><h2>Needs validation</h2><p class="sub" style="margin:4px 0 0">Real enough to look at, but a check was not sure. Confirm by hand before acting.</p><div class="decs">' + nv.map(card).join("") + "</div></section>";
+  if (rj.length) h += '<details class="glass card"><summary><strong>Checked and rejected</strong> <span class="sub">' + rj.length + " with the reason</span></summary><div class=\"decs\">" + rj.map(card).join("") + "</div></details>";
+  if (r.status === "completed" && !F.length) h += '<div class="banner info">No findings in the attack classes searched.</div>';
+  if (D.architecture) h += '<details class="glass card"><summary><strong>Attack surface</strong> <span class="sub">what recon found</span></summary><div class="md" style="margin-top:10px">' + md(D.architecture) + "</div></details>";
+  if (D.run_log) h += '<details class="glass card"><summary><strong>Run log</strong></summary><pre class="file" style="margin-top:10px;max-height:380px;overflow:auto">' + esc(D.run_log) + "</pre></details>";
+  paint(h, keep);
+  if ($("#cycleSel")) $("#cycleSel").onchange = async (e) => { S.cycleId = e.target.value; await loadDetail(); render(false); };
+  const save = (fps, btn) => busy(btn, async () => { try { const j = await api("/api/audit_save", { id: r.id, fingerprints: fps }); toast(j.message); await loadDetail(); render(true); } catch (err) { toast(err.message, true); } });
+  if ($("#aSaveAll")) $("#aSaveAll").onclick = (e) => save(null, e.currentTarget);
+  document.querySelectorAll("[data-afp]").forEach((b) => b.onclick = (e) => save([b.dataset.afp], e.currentTarget));
+}
+
 /* ---------- progress dock: driven by the structured log, updates in place ---------- */
 function showDock(on) { $("#dock").classList.toggle("show", !!on && !S.dockHidden); }
 function paintDock(p) {
   $("#dock").classList.remove("done");
   $("#dTitle").textContent = p.title || "Working";
-  $("#dInfo").textContent = DOCK_INFO[p.type === "map" ? "map" : /^Scan/.test(p.title || "") ? "scan" : "cycle"];
+  $("#dInfo").textContent = DOCK_INFO[p.type === "map" ? "map" : p.type === "audit" ? "audit" : /^Scan/.test(p.title || "") ? "scan" : "cycle"];
   $("#dStep").textContent = p.step || "";
   const pct = Math.max(2, Math.min(100, p.percent || 0));
   $("#dBar").style.width = pct + "%"; $("#dMeter").setAttribute("aria-valuenow", String(Math.round(pct)));

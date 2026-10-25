@@ -52,12 +52,16 @@ if [ -d "$MEMORY_HOME/.git" ]; then
   cp "$KIT_DIR/template/ui/index.html" "$MEMORY_HOME/ui/index.html"
   cp "$KIT_DIR/template/engine/prompt.md" "$MEMORY_HOME/engine/prompt.md"
   cp "$KIT_DIR/template/engine/map-prompt.md" "$MEMORY_HOME/engine/map-prompt.md"
-  for f in hunt-prompt.md validate-prompt.md verify-prompt.md; do cp "$KIT_DIR/template/engine/$f" "$MEMORY_HOME/engine/$f"; done
+  for f in hunt-prompt.md validate-prompt.md verify-prompt.md ask-prompt.md audit-prompt.md; do cp "$KIT_DIR/template/engine/$f" "$MEMORY_HOME/engine/$f"; done
   [ -f "$MEMORY_HOME/engine/repos.json" ] || cp "$KIT_DIR/template/engine/repos.json" "$MEMORY_HOME/engine/repos.json"
   [ -f "$MEMORY_HOME/memory/inbox/README.md" ] || cp "$KIT_DIR/template/memory/inbox/README.md" "$MEMORY_HOME/memory/inbox/README.md"
   cp "$KIT_DIR/template/memory/clients/README.md" "$MEMORY_HOME/memory/clients/README.md"
   grep -qx "logs/" "$MEMORY_HOME/.gitignore" 2>/dev/null || printf "logs/\n" >> "$MEMORY_HOME/.gitignore"
-  ( cd "$MEMORY_HOME"; T="bin ui engine/prompt.md engine/map-prompt.md engine/hunt-prompt.md engine/validate-prompt.md engine/verify-prompt.md engine/repos.json memory/inbox/README.md memory/clients/README.md .gitignore"
+  grep -qx "chat/" "$MEMORY_HOME/.gitignore" 2>/dev/null || printf "chat/\n" >> "$MEMORY_HOME/.gitignore"
+  for sk in "$KIT_DIR"/template/skills/security-audit; do
+    [ -d "$MEMORY_HOME/skills/$(basename "$sk")" ] || { mkdir -p "$MEMORY_HOME/skills"; cp -R "$sk" "$MEMORY_HOME/skills/"; }
+  done
+  ( cd "$MEMORY_HOME"; T="bin ui engine/prompt.md engine/map-prompt.md engine/hunt-prompt.md engine/validate-prompt.md engine/verify-prompt.md engine/ask-prompt.md engine/audit-prompt.md engine/repos.json memory/inbox/README.md memory/clients/README.md skills/security-audit .gitignore"
     if [ -n "$(git status --porcelain -- $T)" ]; then git add -- $T && git commit -qm "tooling: update from somna installer"; fi )
 else
   mkdir -p "$MEMORY_HOME"

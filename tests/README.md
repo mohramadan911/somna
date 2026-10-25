@@ -27,6 +27,7 @@ MOCK_STEP_DELAY=1 tests/run.sh /tmp/somna-t2 4802 test_e2e.py
 |---|---|
 | `test_e2e.py` | A full first-use journey through the page, checked against disk, git and the hook |
 | `test_pipeline.py` | The staged pipeline: recon, hunters per class, every mechanical check, the disprove step, the fresh check, accepting questions, the plain-language review. Run with `PIPELINE=staged SMALL_NIGHT_KB=0 PRESCAN=1` |
+| `test_ask_audit.py` | Ask Somna (what it may read, answers, every kind of suggestion and its checks) and the security audit (stages, code checks, disprove, fresh check, save to memory). Run with `PRESCAN=1 SETUP=1` |
 | `test_scopes.py` | Repos, clients, scoped runs per client, guardrails, inbox merge, hook |
 | `test_runs_and_store.py` | Instructions, models, chosen sessions, cancel, live events, limits, versions, redact, read-only memory |
 | `test_subagents_confidence.py` | AGENTS.md, subagent folding, SubagentStart hook, parallel runs, confidence |

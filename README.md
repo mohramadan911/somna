@@ -185,6 +185,52 @@ add a `CORRECTION:` line to the inbox when the context is wrong. The next cycle 
 them; **Redact** scrubs an old version's content from the whole history (adopt or discard waiting
 proposals first, and force-push if you push the memory repo anywhere).
 
+## Ask Somna
+
+**Ask Somna** in the header opens a chat about your memory, your cycles and your settings:
+
+- "What do you know about shop?", "Why is this a question?", "What changed this week?", "Why did last night
+  cost $1.40?", "What does a session in shop get at start?"
+- "Make nights cheaper", "The shop context still says Jenkins, we use GitHub Actions now", "From now on, always
+  keep the decision list", "Run a cycle on today's sessions".
+
+When it suggests a change you get a card with a button: settings show the old and new value, memory changes
+show the exact lines, a run shows what it will read. Nothing happens until you click.
+
+- **It reads what code gives it.** Your general notes always; a client's files only when your question or the
+  item you have open is about that client. It has no file tools and cannot open anything else.
+- **Its suggestions are checked.** Settings go through the same validation as the Settings page. A memory change
+  goes through the same checks as a cycle's findings (the text exists, no duplicate, right place) and is saved
+  under the memory lock, or queued for the next cycle when a proposal is waiting.
+- **It stays on your Mac.** The conversation is in `~/somna/chat/history.jsonl`, never committed; **Clear**
+  deletes it. Each question is one Claude Code call, on Haiku by default (Settings > Ask Somna and security audits).
+
+"Ask about this" on every change, question, repo and audit opens the chat about that item. From the terminal:
+`somna ask "what do you know about shop?"` (answers only; suggestions need the page).
+
+## Security audit
+
+**Repos > Run security audit** (or `somna audit <repo>`) audits one repo in the same staged way a cycle works:
+
+| Stage | What happens |
+|---|---|
+| Recon | Code collects repo facts and Somna's context for the repo; a read-only run maps the attack surface (`architecture.md`) and picks the attack classes worth hunting |
+| Hunt | One read-only run per attack class (HTTP and auth, cloud, supply chain, data isolation, AI and LLM features, and more) reports findings with exact code quotes |
+| Check | Code checks every path is inside the repo, every line number is in range, every quote is at its line and every function is near it. The same place found twice is merged |
+| Disprove | A run tries to break each finding; a refutation must quote the code that breaks it |
+| Fresh check | A new run sees only the locations and the conditions, not the reasoning, severity or confidence, and confirms or rejects |
+| Report | Code writes `report.md` and `findings.json`: confirmed, needs validation, rejected with the reason |
+
+Nothing is executed and nothing in the repo or in memory changes. **Save to memory** adds confirmed findings to
+the repo's context under "Security findings", so every later Claude Code session in that repo knows about them;
+the nightly cycle only removes one when a commit or session shows it was fixed. Each audit is several Claude
+runs, each capped by the audit spend limit in Settings. Only audit code you are allowed to test.
+
+The `security-audit` skill lets you start it from inside Claude Code ("security audit this repo"). Somna's
+audit follows the design Cloudflare described in
+[Build your own vulnerability harness](https://blog.cloudflare.com/build-your-own-vulnerability-harness); it is
+an independent implementation, read-only by design, without their sandboxed proof-of-concept runs.
+
 ## Isolation and safety
 
 | Piece | Where | Who writes it |
@@ -251,6 +297,10 @@ Claude account sign-in. **Check** runs a one-line test through your Claude Code.
 | `hunt_model` / `check_model` | `""` | Models for the searches and for the checks. Empty = the cycle model |
 | `small_night_kb` | `40` | At or below this much session text (1 or 2 sessions), one combined search and no disprove step |
 | `max_engines` | `4` | Claude runs at the same time across all clients |
+| `chat_model` | `haiku` | Model for Ask Somna |
+| `audit_model` / `audit_check_model` | `""` | Models for audit searches and for the audit checks. Empty = the cycle model |
+| `audit_max_budget_usd` | `3.0` | Spend cap per Claude run in an audit |
+| `audit_max_classes` | `6` | Attack classes per audit |
 | `ui_port` | `4747` | Review page port |
 
 Cost: each client with sessions that day is one engine run. Cost and turns per run are shown in the
@@ -278,6 +328,8 @@ somna assign <repo path or name> <client> [--name short-name] | --ignore
 somna map <repo path or name>                read-only pass, proposes the context file
 somna logs [--level warn] [--event hook] [--cycle <id>] [-f] [-v]
 somna doctor
+somna ask "<question>"                       Ask Somna from the terminal (answers only)
+somna audit <repo path or name> [--classes http-auth,cloud]   security audit, read-only
 ```
 
 ## Logs and troubleshooting

@@ -53,7 +53,7 @@ mode = os.environ.get("MOCK_MODE", "change")
 log = pathlib.Path(os.environ["HOME"]) / "mock-calls.log"
 with open(log, "a") as fh:
     fh.write(json.dumps({"max_turns": a[a.index("--max-turns") + 1] if "--max-turns" in a else None, "budget": a[a.index("--max-budget-usd") + 1] if "--max-budget-usd" in a else None, "cwd": os.getcwd(), "tools": a[a.index("--tools") + 1], "perm": a[a.index("--permission-mode") + 1],
-                         "dirs": [a[i + 1] for i, x in enumerate(a) if x == "--add-dir"], "kind": "map" if prompt.startswith("MAP REPO") else prompt.split("\n", 1)[0].lower() if prompt.startswith(("HUNT", "VALIDATE", "VERIFY")) else "cycle", "model": MODEL,
+                         "dirs": [a[i + 1] for i, x in enumerate(a) if x == "--add-dir"], "kind": "map" if prompt.startswith("MAP REPO") else prompt.split("\n", 1)[0].lower() if prompt.startswith(("HUNT", "VALIDATE", "VERIFY", "ASK", "AUDIT")) else "cycle", "model": MODEL,
                          "instructions": re.search(r"<instructions>\n(.*?)\n</instructions>", prompt, re.S).group(1) if "<instructions>" in prompt else None}) + "\n")
 
 if os.environ.get("MOCK_SLOW"):
@@ -82,6 +82,106 @@ def reply(obj, cost=0.05):
         finish(json.dumps(obj), cost, 3)
     sys.exit(0)
 
+
+if prompt.startswith("ASK"):
+    assert a[a.index("--tools") + 1] == "", "Ask Somna must run without tools"
+    q = re.search(r"<question>\n(.*?)\n</question>", prompt, re.S).group(1)
+    mat = re.search(r"<material>\n(.*)\n</material>", prompt, re.S).group(1)
+    with open(pathlib.Path(os.environ["HOME"]) / "mock-ask.log", "a") as fh:
+        fh.write(json.dumps({"q": q, "material": mat}) + "\n")
+    out = {"answer": "", "cites": [], "actions": []}
+    ql = q.lower()
+    files = re.findall(r"^### (memory/\S+)$", mat, re.M)
+    if "cheaper" in ql:
+        out["answer"] = "Use a cheaper model for the checks."
+        out["actions"].append({"type": "settings", "settings": {"check_model": "haiku"}, "why": "the checks only read and compare"})
+    if "nonsense setting" in ql:
+        out["actions"].append({"type": "settings", "settings": {"turbo_mode": True}})
+    if "jenkins" in ql:
+        for fpath in files:
+            sec = mat.split("### " + fpath + "\n", 1)[1].split("\n### ", 1)[0]
+            line = next((l for l in sec.splitlines() if "Jenkins" in l), None)
+            if line:
+                out["answer"] = "That line is outdated. Here is the change."
+                out["cites"].append(fpath)
+                out["actions"].append({"type": "memory", "file": fpath, "action": "replace", "target_text": line,
+                                       "new_text": "- Deploys run from GitHub Actions", "summary": "Deploys moved from Jenkins to GitHub Actions."})
+                break
+    if "note that" in ql and "memory/clients/acme/repos/shop.md" in files:
+        out["actions"].append({"type": "memory", "file": "memory/clients/acme/repos/shop.md", "action": "add", "section": "## How it ships",
+                               "new_text": "- Releases are tagged on Fridays", "summary": "Releases are tagged on Fridays."})
+    if "sneaky" in ql:
+        out["actions"].append({"type": "memory", "file": "memory/clients/globex/context.md", "action": "add", "section": "## Notes",
+                               "new_text": "- sneaky", "summary": "x"})
+    if "run" in ql.split():
+        out["actions"].append({"type": "run", "since_hours": 24, "instructions": "Focus on the queue alarms."})
+    if "always" in ql:
+        out["actions"].append({"type": "steer", "text": "Always keep the decision list as it is.", "standing": True})
+    if not out["answer"]:
+        out["answer"] = "Here is what I found. Sections: " + ", ".join(re.findall(r"^## (.+)$", mat, re.M)[:30])
+    if os.environ.get("MOCK_ASK_PROSE"):
+        finish("Just some text, not JSON.", 0.003, 1); sys.exit(0)
+    finish(json.dumps(out), 0.004, 1); sys.exit(0)
+
+if prompt.startswith("AUDIT"):
+    stage_ = prompt.split("\n", 1)[0].split()
+    repo = re.search(r"at (/\S+)\.\n", prompt).group(1)
+    if stage_[1] == "RECON":
+        assert "Read,Glob,Grep" == a[a.index("--tools") + 1]
+        cls = [{"id": "http-auth", "why": "it has an app"}, {"id": "supply-chain", "why": "terraform providers"}]
+        if os.environ.get("MOCK_AUDIT_CUSTOM"):
+            cls.append({"id": "custom-webhooks", "title": "Webhooks", "what": "unsigned webhook calls", "why": "x"})
+        finish(json.dumps({"architecture": "## Components\n- app in envs/web/app.py\n- terraform in main.tf", "attack_classes": cls}), 0.1, 3); sys.exit(0)
+    if stage_[1] == "HUNT":
+        cls = stage_[2]
+        if os.environ.get("MOCK_AUDIT_HUNTFAIL"):
+            print("hunter crashed", file=sys.stderr); sys.exit(3)
+        fs = []
+        if cls == "http-auth":
+            fs.append({"id": "h1", "title": "App prints without auth check", "severity": "high", "confidence": "high",
+                       "description": "The app runs code with no authentication.", "root_cause": "no auth middleware",
+                       "trace": [{"path": "envs/web/app.py", "line": 1, "symbol": "print", "note": "entry"}],
+                       "evidence": [{"path": "envs/web/app.py", "line": 1, "quote": "print(1)"}],
+                       "conditions": "network access", "remediation": "add an auth check"})
+            fs.append({"id": "h2", "title": "Same app issue seen twice", "severity": "medium", "confidence": "medium",
+                       "description": "dup", "root_cause": "dup", "trace": [{"path": "envs/web/app.py", "line": 1, "symbol": "print", "note": "entry"}],
+                       "evidence": [{"path": "envs/web/app.py", "line": 1, "quote": "print(1)"}], "conditions": "x", "remediation": "x"})
+        if cls == "supply-chain":
+            fs.append({"id": "s1", "title": "Provider not pinned", "severity": "medium", "confidence": "high",
+                       "description": "The provider version is not pinned.", "root_cause": "no version constraint",
+                       "trace": [{"path": "main.tf", "line": 1, "symbol": "resource", "note": "the resource"}],
+                       "evidence": [{"path": "main.tf", "line": 1, "quote": 'resource "x" "y" {}'}],
+                       "conditions": "a malicious provider release", "remediation": "pin the provider"})
+            fs.append({"id": "s2", "title": "Made up file", "severity": "low", "confidence": "low", "description": "x", "root_cause": "x",
+                       "trace": [], "evidence": [{"path": "nope/missing.tf", "line": 3, "quote": "x"}], "conditions": "x", "remediation": "x"})
+            if os.environ.get("MOCK_AUDIT_BADLINE"):
+                fs.append({"id": "s3", "title": "Line past the end", "severity": "low", "confidence": "low", "description": "x", "root_cause": "x",
+                           "trace": [], "evidence": [{"path": "main.tf", "line": 40, "quote": "resource"}], "conditions": "x", "remediation": "x"})
+            if os.environ.get("MOCK_AUDIT_ESCAPE"):
+                fs.append({"id": "s4", "title": "Escape", "severity": "low", "confidence": "low", "description": "x", "root_cause": "x",
+                           "trace": [], "evidence": [{"path": "../../../../etc/hostname", "line": 1, "quote": "a"}], "conditions": "x", "remediation": "x"})
+        finish(json.dumps({"findings": fs}), 0.2, 5); sys.exit(0)
+    if stage_[1] == "VALIDATE":
+        fpath = re.search(r"Try to DISPROVE each finding in (\S+)\. ", prompt).group(1)
+        fs = json.loads(pathlib.Path(fpath).read_text())["findings"]
+        vs = []
+        for f in fs:
+            v = {"id": f["id"], "verdict": "upheld", "reason": "nothing stops it", "path": f["evidence"][0]["path"], "line": f["evidence"][0]["line"], "quote": f["evidence"][0]["quote"]}
+            if os.environ.get("MOCK_AUDIT_REFUTE") and "Provider" in f["title"]:
+                v.update(verdict="refuted", reason="the lock file pins it", path="main.tf", line=1, quote='resource "x" "y" {}')
+            vs.append(v)
+        finish(json.dumps({"verdicts": vs}), 0.05, 2); sys.exit(0)
+    if stage_[1] == "VERIFY":
+        ipath = re.search(r"For each item in (\S+), ", prompt).group(1)
+        items = json.loads(pathlib.Path(ipath).read_text())["items"]
+        assert all(not ({"description", "root_cause", "confidence", "severity", "remediation"} & set(i)) for i in items), "fresh check saw reasoning"
+        cs = []
+        for i in items:
+            v = "confirmed"
+            if os.environ.get("MOCK_AUDIT_UNSURE") and "auth" in i["title"]:
+                v = "needs_validation"
+            cs.append({"id": i["id"], "verdict": v, "reason": "the code shows it"})
+        finish(json.dumps({"checks": cs}), 0.05, 2); sys.exit(0)
 
 if prompt.startswith("HUNT"):
     if mode == "fail" or (os.environ.get("MOCK_HUNT_FAIL") and os.environ["MOCK_HUNT_FAIL"] in prompt.split("\n", 1)[0]):

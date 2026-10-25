@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.0 (2026-10-25)
+
+- **Ask Somna:** a chat panel on every page. Ask what Somna knows about a repo, why a change was made or held,
+  what changed this week, why a night cost what it did, or what a session in a repo gets at start. It can suggest
+  settings changes, memory changes, a run or a standing rule; each comes with a button and nothing happens
+  until you click. Code decides what it may read (your general notes, a client's files only when the question or
+  the open item is about that client), it has no file tools, and memory changes go through the same checks as a
+  cycle's findings. Conversations stay on your Mac. "Ask about this" on every change and repo.
+- **Security audit** of a repo (Repos > Run security audit, or `somna audit <repo>`): recon maps the attack
+  surface and picks attack classes, one read-only search per class, code checks every path, line, function and
+  quote, a second run tries to disprove each finding, and a fresh agent that only sees the locations confirms it.
+  Nothing is run or changed. Save confirmed findings to the repo's context under "Security findings" so every
+  later session there knows about them; a nightly cycle only removes one when a commit or session shows it was
+  fixed. A `security-audit` skill lets you start it from Claude Code.
+- Settings for the chat model, the audit models, the audit spend cap per run and the number of attack classes.
+
 ## 1.1.0 (2026-10-24)
 
 A cycle now works in stages, so nothing grades its own work, and the review page reads like your week.
