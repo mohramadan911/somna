@@ -53,7 +53,8 @@ mode = os.environ.get("MOCK_MODE", "change")
 log = pathlib.Path(os.environ["HOME"]) / "mock-calls.log"
 with open(log, "a") as fh:
     fh.write(json.dumps({"max_turns": a[a.index("--max-turns") + 1] if "--max-turns" in a else None, "budget": a[a.index("--max-budget-usd") + 1] if "--max-budget-usd" in a else None, "cwd": os.getcwd(), "tools": a[a.index("--tools") + 1], "perm": a[a.index("--permission-mode") + 1],
-                         "dirs": [a[i + 1] for i, x in enumerate(a) if x == "--add-dir"], "kind": "map" if prompt.startswith("MAP REPO") else prompt.split("\n", 1)[0].lower() if prompt.startswith(("HUNT", "VALIDATE", "VERIFY", "ASK", "AUDIT")) else "cycle", "model": MODEL,
+                         "dirs": [a[i + 1] for i, x in enumerate(a) if x == "--add-dir"], "strict_mcp": "--strict-mcp-config" in a,
+                         "setting_sources": a[a.index("--setting-sources") + 1] if "--setting-sources" in a else None, "kind": "map" if prompt.startswith("MAP REPO") else prompt.split("\n", 1)[0].lower() if prompt.startswith(("HUNT", "VALIDATE", "VERIFY", "ASK", "AUDIT")) else "cycle", "model": MODEL,
                          "instructions": re.search(r"<instructions>\n(.*?)\n</instructions>", prompt, re.S).group(1) if "<instructions>" in prompt else None}) + "\n")
 
 if os.environ.get("MOCK_SLOW"):
@@ -110,6 +111,18 @@ if prompt.startswith("ASK"):
     if "note that" in ql and "memory/clients/acme/repos/shop.md" in files:
         out["actions"].append({"type": "memory", "file": "memory/clients/acme/repos/shop.md", "action": "add", "section": "## How it ships",
                                "new_text": "- Releases are tagged on Fridays", "summary": "Releases are tagged on Fridays."})
+    if "xss" in ql:
+        out["actions"].append({"type": "run", "since_hours": 24, "instructions": '<img src=x onerror="window.__pwned=1">'})
+    if "readme" in ql:
+        out["actions"].append({"type": "memory", "file": "memory/clients/README.md", "action": "add", "new_text": "- x", "summary": "x"})
+    if "uppercase" in ql:
+        out["actions"].append({"type": "memory", "file": "memory/Clients/acme/repos/shop.md", "action": "add", "section": "## X", "new_text": "- x", "summary": "x"})
+    if "both clients" in ql:
+        out["actions"].append({"type": "memory", "file": "memory/clients/acme/repos/shop.md", "action": "add", "section": "## X", "new_text": "- both", "summary": "x"})
+    if "bad model type" in ql:
+        out["actions"].append({"type": "settings", "settings": {"chat_model": 5}})
+    if "option injection" in ql:
+        out["actions"].append({"type": "run", "since_hours": 24, "instructions": "--model=opus"})
     if "sneaky" in ql:
         out["actions"].append({"type": "memory", "file": "memory/clients/globex/context.md", "action": "add", "section": "## Notes",
                                "new_text": "- sneaky", "summary": "x"})
@@ -130,7 +143,7 @@ if prompt.startswith("AUDIT"):
         assert "Read,Glob,Grep" == a[a.index("--tools") + 1]
         cls = [{"id": "http-auth", "why": "it has an app"}, {"id": "supply-chain", "why": "terraform providers"}]
         if os.environ.get("MOCK_AUDIT_CUSTOM"):
-            cls.append({"id": "custom-webhooks", "title": "Webhooks", "what": "unsigned webhook calls", "why": "x"})
+            cls.append({"id": "custom-webhooks", "title": 'Webhooks <img src=x onerror="window.__pwn2=1">', "what": "unsigned webhook calls", "why": "x"})
         finish(json.dumps({"architecture": "## Components\n- app in envs/web/app.py\n- terraform in main.tf", "attack_classes": cls}), 0.1, 3); sys.exit(0)
     if stage_[1] == "HUNT":
         cls = stage_[2]
@@ -143,7 +156,10 @@ if prompt.startswith("AUDIT"):
                        "trace": [{"path": "envs/web/app.py", "line": 1, "symbol": "print", "note": "entry"}],
                        "evidence": [{"path": "envs/web/app.py", "line": 1, "quote": "print(1)"}],
                        "conditions": "network access", "remediation": "add an auth check"})
-            fs.append({"id": "h2", "title": "Same app issue seen twice", "severity": "medium", "confidence": "medium",
+            fs.append({"id": "h1", "title": "CSRF on the same entry point", "severity": "medium", "confidence": "medium",
+                       "description": "no CSRF token", "root_cause": "no token", "trace": [{"path": "envs/web/app.py", "line": 1, "symbol": "print", "note": "entry"}],
+                       "evidence": [{"path": "envs/web/app.py", "line": 1, "quote": "print(1)"}], "conditions": "a logged-in victim", "remediation": "add CSRF tokens"})
+            fs.append({"id": "h2", "title": "App prints without an auth check", "severity": "medium", "confidence": "medium",
                        "description": "dup", "root_cause": "dup", "trace": [{"path": "envs/web/app.py", "line": 1, "symbol": "print", "note": "entry"}],
                        "evidence": [{"path": "envs/web/app.py", "line": 1, "quote": "print(1)"}], "conditions": "x", "remediation": "x"})
         if cls == "supply-chain":

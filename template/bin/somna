@@ -1161,7 +1161,9 @@ def git_activity(root, since):
 
 # ---------------- core: create a cycle ----------------
 def _engine_cmd(cfg, engine, prompt, tools, add_dirs, model_key="model", budget_key="max_budget_usd", edits=True,
-                model=None):
+                model=None, isolate=None):
+    """isolate="mcp": no MCP servers from your config. isolate="repo": also ignore settings, hooks and MCP config that
+    live in the folder Claude runs in, for runs inside a repo Somna does not trust (map, audit)."""
     stream = cfg.get("stream_events", True)
     cmd = [engine, "-p", prompt, "--output-format", "stream-json" if stream else "json",
            "--permission-mode", "acceptEdits" if edits else "default", "--allowedTools", tools]
@@ -1180,6 +1182,10 @@ def _engine_cmd(cfg, engine, prompt, tools, add_dirs, model_key="model", budget_
         cmd += ["--max-budget-usd", str(cfg[budget_key])]
     if cfg.get("max_turns"):
         cmd += ["--max-turns", str(int(cfg["max_turns"]))]
+    if isolate:
+        cmd += ["--strict-mcp-config"]
+    if isolate == "repo":
+        cmd += ["--setting-sources", "user"]
     cmd += list(cfg.get("extra_claude_args", []))
     return cmd
 
@@ -1366,6 +1372,10 @@ def _run_engine(cmd, cwd, timeout_s, logfile, label, ddir=None, group=None, root
                                                               "cache_creation_input_tokens") if k in out["usage"]}
     usage["memory_reads"], usage["memory_writes"] = state["mem"]["read"], state["mem"]["write"]
     dur = round(time.time() - t0, 1)
+    if proc.returncode != 0 and re.search(r"(unknown|unrecognized) option.*(--strict-mcp-config|--setting-sources)", stderr, re.I):
+        log("error", "engine.outdated", label, stderr=stderr[-400:])
+        raise SomnaError("your Claude Code is too old for the isolation flags this run needs. Update it (claude update) and try again",
+                         etype="engine_outdated")
     if proc.returncode != 0:
         log("error", "engine.failed", label, exit=proc.returncode, seconds=dur, stderr=stderr[-800:])
         raise SomnaError("engine exited with {} ({}), see the engine log".format(proc.returncode, label), etype="internal_error")
@@ -1785,7 +1795,7 @@ def validate_inputs(instructions=None, model=None, session_ids=None):
     if session_ids is not None:
         if not (1 <= len(session_ids) <= MAX_SESSIONS_PER_CYCLE):
             raise SomnaError("choose between 1 and {} sessions (got {})".format(MAX_SESSIONS_PER_CYCLE, len(session_ids)))
-        bad = [x for x in session_ids if not re.match(r"^[A-Za-z0-9_.-]{1,80}$", x)]
+        bad = [x for x in session_ids if not re.match(r"^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,79}$", x)]
         if bad:
             raise SomnaError("not a session id: {}".format(", ".join(bad[:3])))
     if model is not None and not re.match(r"^[A-Za-z0-9_.\[\]-]{1,80}$", model):
@@ -2466,7 +2476,8 @@ def run_staged(g, ctx):
         """One read-only Claude run. It can open only the folders it is given: the hunters never see the run's
         logs, and the fresh check never sees the findings, their summaries or anyone's reasoning."""
         (ddir / "prompt-{}-{}.md".format(slug(g), kind)).write_text(prompt)
-        cmd = _engine_cmd(cfg, engine, prompt, "Read,Glob,Grep", [d for d in dirs if d] + roots, edits=False, model=mdl)
+        cmd = _engine_cmd(dict(cfg, restrict_tools=True), engine, prompt, "Read,Glob,Grep", [d for d in dirs if d] + roots, edits=False,
+                          model=mdl, isolate="mcp")
         with _engine_slot(cfg):
             if cancel_requested(ddir):
                 raise CycleCanceled()
@@ -3166,8 +3177,8 @@ def do_map(root, out=print):
                      "{{OTHER_CLIENTS}}": ", ".join(c for c in reg["clients"] if c != client) or "(none)"}.items():
             prompt = prompt.replace(k, v)
         (ddir / "prompt-map.md").write_text(prompt)
-        cmd = _engine_cmd(cfg, engine, prompt, "Read,Glob,Grep", [], model_key="map_model",
-                          budget_key="map_max_budget_usd", edits=False)
+        cmd = _engine_cmd(dict(cfg, restrict_tools=True), engine, prompt, "Read,Glob,Grep", [], model_key="map_model",
+                          budget_key="map_max_budget_usd", edits=False, isolate="repo")
         usage = _run_engine(cmd, root, cfg["timeout_minutes"] * 60, ddir / "engine.log", "map " + name,
                             ddir=ddir, group="map", roots=[(root, "repo/")])
         after = subprocess.run(["git", "-C", root, "status", "--porcelain"], capture_output=True, text=True).stdout
@@ -3941,6 +3952,8 @@ def _check_value(key, v):
             raise SomnaError("{} must be on or off".format(key))
         return v
     if kind == "model":
+        if v is not None and not isinstance(v, str):
+            raise SomnaError("{} must be a model name".format(key))
         v = (v or "").strip()
         if v and not re.match(r"^[A-Za-z0-9_.:/\[\]-]{1,200}$", v):
             raise SomnaError("not a model name or ARN: {}".format(v))
@@ -4456,6 +4469,15 @@ def job_progress():
         return {"running": False, "last": _cycle_summary(last) if last else None}
     cur = next((r for r in recs if r["status"] in ("pending", "running")), None)
     if not cur:
+        # the run's record is already done but it still holds the lock: it is saving or adopting, not starting over
+        done = recs[0] if recs else None
+        try:
+            fresh = done and done.get("ended_at") and (utcnow() - parse_iso(done["ended_at"])).total_seconds() < 120
+        except (KeyError, ValueError, TypeError):
+            fresh = False
+        if fresh:
+            return {"running": True, "pid": pid, "type": done.get("type", "cycle"), "percent": 98, "title": "Finishing",
+                    "step": "Saving the result", "steps": [], "recent": [], "elapsed": 0}
         return {"running": True, "pid": pid, "percent": 2, "title": "Starting", "step": "Preparing inputs",
                 "steps": [], "recent": [], "elapsed": 0}
     kind = cur.get("type", "cycle")
@@ -4922,10 +4944,20 @@ AUDIT_JOBS = {
 
 
 def _fingerprint(cls, f):
-    loc = (f.get("evidence") or [{}])[0]
-    sym = next((t.get("symbol") for t in f.get("trace") or [] if t.get("symbol")), "")
-    # same class, same place in the code: the same root cause, whatever the title says
-    return hashlib.sha256("{}|{}|{}|{}".format(cls, loc.get("path", ""), loc.get("line") or "", sym).encode()).hexdigest()[:12]
+    locs = sorted("{}:{}".format(e.get("path", ""), e.get("line") or "") for e in f.get("evidence") or [])
+    syms = sorted({t.get("symbol") for t in f.get("trace") or [] if t.get("symbol")})
+    # the same places in the code and the same functions: a candidate for the same bug, whichever hunter found it
+    return hashlib.sha256("{}|{}".format(",".join(locs), ",".join(syms)).encode()).hexdigest()[:12]
+
+
+def _title_words(s):
+    stop = {"a", "an", "the", "in", "of", "to", "and", "or", "is", "on", "for", "with", "without", "no", "not", "via", "by"}
+    return {w for w in re.findall(r"[a-z0-9]+", str(s or "").lower()) if w not in stop}
+
+
+def _same_bug(a, b):
+    wa, wb = _title_words(a.get("title")), _title_words(b.get("title"))
+    return bool(wa and wb) and len(wa & wb) / float(len(wa | wb)) >= 0.5
 
 
 def check_audit_findings(raw, root):
@@ -4935,7 +4967,7 @@ def check_audit_findings(raw, root):
     for i, f in enumerate(raw[:120]):
         if not isinstance(f, dict):
             continue
-        item = {"id": str(f.get("id") or "h{}".format(i + 1))[:24], "class": str(f.get("_class") or ""),
+        item = {"id": str(f.get("id") or "a{}".format(i + 1))[:24], "class": str(f.get("_class") or ""),
                 "title": _norm(f.get("title"))[:200], "severity": str(f.get("severity") or "").lower(),
                 "confidence": str(f.get("confidence") or "").lower(), "description": _norm(f.get("description"))[:1500],
                 "root_cause": _norm(f.get("root_cause"))[:1000], "conditions": _norm(f.get("conditions"))[:600],
@@ -4993,6 +5025,9 @@ def check_audit_findings(raw, root):
         item["fingerprint"] = _fingerprint(item["class"], item)
         first = item["evidence"][0]
         item["where"] = "{}:{}".format(first["path"], first["line"]) if first.get("line") else first["path"]
+        if not item.get("rejected") and item["fingerprint"] in seen and not _same_bug(item, seen[item["fingerprint"]]):
+            # same place, different problem (say missing auth and CSRF on one route): keep both
+            item["fingerprint"] = hashlib.sha256((item["fingerprint"] + _norm(item["title"]).lower()).encode()).hexdigest()[:12]
         if not item.get("rejected") and item["fingerprint"] in seen:
             other = seen[item["fingerprint"]]
             keep = item if AUDIT_SEVERITY.index(item["severity"]) < AUDIT_SEVERITY.index(other["severity"]) else other
@@ -5018,7 +5053,6 @@ def do_audit(root, out=print, classes=None):
     engine = find_claude(cfg)
     if not engine:
         raise SomnaError("Claude Code CLI not found")
-    acquire_lock()
     did = new_id()
     _current_cycle.id = did
     ddir = CYCLES / did
@@ -5028,51 +5062,56 @@ def do_audit(root, out=print, classes=None):
            "started_at": iso(utcnow()), "ended_at": None, "inputs": [{"type": "repo", "path": root, "head": repo_head(root)}],
            "outputs": [], "error": None, "usage": None, "review": None, "archived_at": None, "report": None, "diffstat": None,
            "tool_version": VERSION, "actor": ACTOR, "repo": {"path": root, "client": client, "name": name}, "stages": [], "audit_findings": []}
-    save_rec(rec)
-    log("info", "audit.start", "security audit started", path=root, client=client, name=name)
-    t0 = time.time()
-    usage = {"total_cost_usd": 0.0, "num_turns": 0, "tokens": {}}
-    ulock, rlock = threading.Lock(), threading.Lock()
-    before = subprocess.run(["git", "-C", root, "status", "--porcelain"], capture_output=True, text=True).stdout
-    work = ddir / "audit"
-    work.mkdir(exist_ok=True)
-
-    def stage(nm, **kw):
-        with rlock:
-            st = next((s for s in rec["stages"] if s["stage"] == nm), None)
-            if not st:
-                st = {"stage": nm}
-                rec["stages"].append(st)
-            st.update(kw)
-            save_rec(rec)
-        log("info", "stage." + nm, "audit {}: {}".format(name, nm), group="audit", **{k: v for k, v in kw.items() if k != "status"})
-
-    facts = repo_facts(root)
-    ctx_text = (HOME / context_rel(client, name)).read_text(errors="replace")[:7000] if (HOME / context_rel(client, name)).exists() else "(not mapped yet)"
-    tpl = HOME / "engine" / "audit-prompt.md"
-    tpl = tpl.read_text() if tpl.exists() else DEFAULT_AUDIT_PROMPT
-    base_subs = {"{{REPO_NAME}}": name, "{{CLIENT}}": client, "{{REPO_PATH}}": root, "{{TODAY}}": dt.date.today().isoformat(),
-                 "{{CONTEXT}}": ctx_text, "{{FACTS}}": json.dumps({k: v for k, v in facts.items() if k != "tree"}, indent=1) + "\n" + facts["tree"][:6000]}
-
-    def call(kind, job_subs, dirs, model_key):
-        job, outp = AUDIT_JOBS[kind.split()[0]]
-        p = _fill(tpl, dict(base_subs, **{"{{STAGE}}": kind, "{{JOB}}": _fill(job, job_subs), "{{OUTPUT}}": outp}))
-        (ddir / "prompt-audit-{}.md".format(slug(kind))).write_text(p)
-        c = dict(cfg, max_budget_usd=cfg.get("audit_max_budget_usd"))
-        cmd = _engine_cmd(c, engine, p, "Read,Glob,Grep", dirs, edits=False, model=cfg.get(model_key) or cfg.get("audit_model") or cfg.get("model") or None)
-        with _engine_slot(cfg):
-            if cancel_requested(ddir):
-                raise CycleCanceled()
-            u = _run_engine(cmd, root, cfg["timeout_minutes"] * 60, ddir / "engine.log", "audit " + kind.lower(), ddir=ddir,
-                            group="audit", roots=[(root, "repo/")], usage_key="audit:" + kind.lower())
-        with ulock:
-            usage["total_cost_usd"] += u.get("total_cost_usd") or 0
-            usage["num_turns"] += u.get("num_turns") or 0
-            for k, v in (u.get("tokens") or {}).items():
-                usage["tokens"][k] = usage["tokens"].get(k, 0) + (v or 0)
-        return parse_json_reply(u.get("result"))
-
+    acquire_lock()
     try:
+        save_rec(rec)
+        log("info", "audit.start", "security audit started", path=root, client=client, name=name)
+        t0 = time.time()
+        usage = {"total_cost_usd": 0.0, "num_turns": 0, "tokens": {}}
+        ulock, rlock = threading.Lock(), threading.Lock()
+        before = subprocess.run(["git", "-C", root, "status", "--porcelain"], capture_output=True, text=True).stdout
+        work = ddir / "audit"
+        work.mkdir(exist_ok=True)
+
+        def stage(nm, **kw):
+            with rlock:
+                st = next((s for s in rec["stages"] if s["stage"] == nm), None)
+                if not st:
+                    st = {"stage": nm}
+                    rec["stages"].append(st)
+                st.update(kw)
+                save_rec(rec)
+            log("info", "stage." + nm, "audit {}: {}".format(name, nm), group="audit", **{k: v for k, v in kw.items() if k != "status"})
+
+        facts = repo_facts(root)
+        ctx_text = (HOME / context_rel(client, name)).read_text(errors="replace")[:7000] if (HOME / context_rel(client, name)).exists() else "(not mapped yet)"
+        tpl = HOME / "engine" / "audit-prompt.md"
+        tpl = tpl.read_text() if tpl.exists() else DEFAULT_AUDIT_PROMPT
+        base_subs = {"{{REPO_NAME}}": name, "{{CLIENT}}": client, "{{REPO_PATH}}": root, "{{TODAY}}": dt.date.today().isoformat(),
+                     "{{CONTEXT}}": ctx_text, "{{FACTS}}": json.dumps({k: v for k, v in facts.items() if k != "tree"}, indent=1) + "\n" + facts["tree"][:6000]}
+
+        def call(kind, job_subs, dirs, model_key):
+            job, outp = AUDIT_JOBS[kind.split()[0]]
+            subs_ = dict(base_subs)
+            if kind == "VERIFY":
+                subs_["{{CONTEXT}}"] = "(not shown to the fresh check, so it judges the code on its own)"
+            p = _fill(tpl, dict(subs_, **{"{{STAGE}}": kind, "{{JOB}}": _fill(job, job_subs), "{{OUTPUT}}": outp}))
+            (ddir / "prompt-audit-{}.md".format(slug(kind))).write_text(p)
+            c = dict(cfg, max_budget_usd=cfg.get("audit_max_budget_usd"), restrict_tools=True)
+            cmd = _engine_cmd(c, engine, p, "Read,Glob,Grep", dirs, edits=False, model=cfg.get(model_key) or cfg.get("audit_model") or cfg.get("model") or None,
+                              isolate="repo")
+            with _engine_slot(cfg):
+                if cancel_requested(ddir):
+                    raise CycleCanceled()
+                u = _run_engine(cmd, root, cfg["timeout_minutes"] * 60, ddir / "engine.log", "audit " + kind.lower(), ddir=ddir,
+                                group="audit", roots=[(root, "repo/")], usage_key="audit:" + kind.lower())
+            with ulock:
+                usage["total_cost_usd"] += u.get("total_cost_usd") or 0
+                usage["num_turns"] += u.get("num_turns") or 0
+                for k, v in (u.get("tokens") or {}).items():
+                    usage["tokens"][k] = usage["tokens"].get(k, 0) + (v or 0)
+            return parse_json_reply(u.get("result"))
+
         # recon
         stage("recon", status="running")
         menu = "\n".join("- {}: {}: {}".format(k, v[0], v[1]) for k, v in AUDIT_CLASSES.items())
@@ -5091,7 +5130,8 @@ def do_audit(root, out=print, classes=None):
             if cid in AUDIT_CLASSES:
                 picked.append({"id": cid, "title": AUDIT_CLASSES[cid][0], "what": AUDIT_CLASSES[cid][1], "why": _norm(c.get("why"))[:200]})
             elif re.match(r"^custom-[a-z0-9-]{2,40}$", cid) and sum(1 for p_ in picked if p_["id"].startswith("custom-")) < 2:
-                picked.append({"id": cid, "title": _norm(c.get("title"))[:80] or cid, "what": _norm(c.get("what"))[:400], "why": _norm(c.get("why"))[:200]})
+                clean = lambda s, n: re.sub(r"[<>`]", "", _norm(s))[:n]
+                picked.append({"id": cid, "title": clean(c.get("title"), 80) or cid, "what": clean(c.get("what"), 400), "why": clean(c.get("why"), 200)})
         if classes:
             picked = [{"id": c, "title": AUDIT_CLASSES[c][0], "what": AUDIT_CLASSES[c][1], "why": "chosen by you"} for c in classes if c in AUDIT_CLASSES]
         if not picked:
@@ -5126,7 +5166,7 @@ def do_audit(root, out=print, classes=None):
                 for f in fs:
                     if isinstance(f, dict):
                         f["_class"] = cid
-                        f["id"] = "{}-{}".format(cid, f.get("id") or len(raw) + 1)
+                        f["id"] = "a{}".format(len(raw) + 1)   # ids come from code, so verdicts always land on the right finding
                         raw.append(f)
         if failed and len(failed) == len(picked):
             raise SomnaError("every hunter failed ({})".format(failed[0]["error"]))
@@ -5161,7 +5201,9 @@ def do_audit(root, out=print, classes=None):
                 if verdict == "refuted":
                     p_ = _inside(root, str(v.get("path") or "")) if v.get("path") else None
                     b = _read_mem(p_)[0] if p_ and p_.is_file() else ""
-                    ok = b and (_line_has(b, v["line"], v.get("quote")) if isinstance(v.get("line"), int) else _contains(b, v.get("quote")))
+                    q_ = _norm(v.get("quote"))
+                    ok = b and len(q_) >= 12 and len(re.findall(r"[A-Za-z0-9_]+", q_)) >= 2 and (
+                        _line_has(b, v["line"], q_) if isinstance(v.get("line"), int) else _contains(b, q_))
                     if ok:
                         f.update(rejected="Disproved: " + (f["validator"]["reason"] or "the code shows it cannot happen."), rejected_by="validator")
                     else:
@@ -5217,6 +5259,9 @@ def do_audit(root, out=print, classes=None):
         order = lambda f: (["confirmed", "needs_validation", "rejected"].index(f["status"]),
                            AUDIT_SEVERITY.index(f["severity"]) if f["severity"] in AUDIT_SEVERITY else 9)
         found.sort(key=order)
+        for f in found:
+            if f["status"] != "rejected":
+                f["memory_line"] = audit_memory_line(f, did)
         rec["audit_findings"] = found
         groups = {k: [f for f in found if f["status"] == k] for k in ("confirmed", "needs_validation", "rejected")}
         (ddir / "findings.json").write_text(json.dumps(groups, indent=1))
@@ -5269,6 +5314,15 @@ def do_audit(root, out=print, classes=None):
         release_lock()
 
 
+def audit_memory_line(f, did, day=None):
+    """The one line a finding becomes in the repo context. Everything model-written is flattened to one plain line."""
+    flat = lambda s, n: re.sub(r"[`<>]", "", _norm(s))[:n].lstrip("#-* ")
+    return "- [{}] {}: {}{} (found {} by audit {}; fix: {})".format(
+        f.get("severity") if f.get("severity") in AUDIT_SEVERITY else "unknown", flat(f.get("title"), 160), flat(f.get("where"), 200),
+        "" if f.get("status") == "confirmed" else ", not confirmed yet", day or dt.date.today().isoformat(), did,
+        flat(f.get("remediation") or "see the audit report", 200))
+
+
 def do_audit_save(did, fingerprints=None):
     """Write confirmed (or chosen) findings into the repo's context under Security findings, as the owner's change."""
     with _decide_lock:
@@ -5282,9 +5336,7 @@ def do_audit_save(did, fingerprints=None):
         if not pick:
             raise SomnaError("nothing to save")
         day = dt.date.today().isoformat()
-        lines = "\n".join("- [{}] {}: {}{} (found {} by audit {}; fix: {})".format(
-            f["severity"], f["title"], f.get("where"), "" if f["status"] == "confirmed" else ", not confirmed yet", day, did,
-            (f.get("remediation") or "see the audit report")[:200]) for f in pick)
+        lines = "\n".join(audit_memory_line(f, did, day) for f in pick)
         d = {"file": rel, "action": "add", "section": "## Security findings", "target_text": "", "new_text": lines,
              "plain": "security findings from audit {}".format(did)}
         msg = _owner_change(d, "audit")
@@ -5376,14 +5428,15 @@ At most 3 actions, and an empty list when none is needed.
 def _mentioned_clients(text, reg):
     t = " " + re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()) + " "
     out = set()
+    hit = lambda n, short: n and len(n) >= short and " {} ".format(re.sub(r"[^a-z0-9]+", " ", n).strip()) in t
     for cid, c in reg.get("clients", {}).items():
-        names = {cid, str(c.get("name") or "").lower()} | {str(m).lower() for m in c.get("markers") or []}
-        if any(n and " {} ".format(re.sub(r"[^a-z0-9]+", " ", n).strip()) in t for n in names):
+        # the client's id or name counts from 3 letters; markers and repo names only when they are specific (4+)
+        if hit(cid.lower(), 3) or hit(str(c.get("name") or "").lower(), 3) or any(hit(str(m).lower(), 4) for m in c.get("markers") or []):
             out.add(cid)
     for root, r in reg.get("repos", {}).items():
         if r.get("client") and r.get("status") == "confirmed":
             for n in {str(r.get("name") or "").lower(), Path(root).name.lower()}:
-                if n and " {} ".format(re.sub(r"[^a-z0-9]+", " ", n).strip()) in t:
+                if hit(n, 4):
                     out.add(r["client"])
     return out
 
@@ -5397,8 +5450,11 @@ def _md_file(rel, limit=6000):
 
 
 def _hook_preview(root):
-    r = subprocess.run([sys.executable, str(SCRIPT), "hook", "session-start"], input=json.dumps({"cwd": root, "session_id": "ask-preview"}),
-                       capture_output=True, text=True, env=dict(os.environ, SOMNA_HOME=str(HOME), SOMNA_ACTOR="ui"), timeout=20)
+    try:
+        r = subprocess.run([sys.executable, str(SCRIPT), "hook", "session-start"], input=json.dumps({"cwd": root, "session_id": "ask-preview"}),
+                           capture_output=True, text=True, env=dict(os.environ, SOMNA_HOME=str(HOME), SOMNA_ACTOR="ui"), timeout=20)
+    except (subprocess.TimeoutExpired, OSError):
+        return "(the preview took too long)"
     try:
         return json.loads(r.stdout or "{}").get("hookSpecificOutput", {}).get("additionalContext", "")
     except ValueError:
@@ -5410,8 +5466,7 @@ def ask_bundle(question, focus=None, history=()):
     focus = focus if isinstance(focus, dict) else {}
     reg = load_repos()
     cfg = load_cfg()
-    words = question + " " + " ".join(h.get("q", "") for h in list(history)[-3:])
-    scope = _mentioned_clients(words, reg)
+    scope = _mentioned_clients(question, reg)
     rec = None
     if valid_id(focus.get("cycle")):
         try:
@@ -5510,22 +5565,54 @@ def chat_history(limit=60):
     return out
 
 
+class _ChatLock:
+    """One writer at a time across the page and the terminal."""
+    def __enter__(self):
+        import fcntl
+        CHAT_DIR.mkdir(parents=True, exist_ok=True)
+        self.fh = open(str(CHAT_DIR / ".lock"), "a")
+        fcntl.flock(self.fh, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        import fcntl
+        fcntl.flock(self.fh, fcntl.LOCK_UN)
+        self.fh.close()
+
+
 def _chat_append(entry):
-    CHAT_DIR.mkdir(parents=True, exist_ok=True)
-    with _file_lock:
+    with _ChatLock():
         with open(str(CHAT_LOG), "a") as fh:
             fh.write(json.dumps(entry, default=str) + "\n")
 
 
-def _chat_rewrite(entries):
-    CHAT_DIR.mkdir(parents=True, exist_ok=True)
-    with _file_lock:
-        CHAT_LOG.write_text("".join(json.dumps(e, default=str) + "\n" for e in entries))
+def _chat_update(entry_id, fn):
+    """Change one entry in place, keeping every other line exactly as it is."""
+    with _ChatLock():
+        lines = CHAT_LOG.read_text(errors="replace").splitlines() if CHAT_LOG.exists() else []
+        out, found = [], None
+        for line in lines:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                out.append(line)
+                continue
+            if e.get("id") == entry_id and found is None:
+                fn(e)
+                found = e
+                line = json.dumps(e, default=str)
+            out.append(line)
+        if found is not None:
+            tmp = CHAT_LOG.with_suffix(".tmp")
+            tmp.write_text("".join(l + "\n" for l in out))
+            tmp.replace(CHAT_LOG)
+        return found
 
 
 def chat_clear():
-    if CHAT_LOG.exists():
-        CHAT_LOG.unlink()
+    with _ChatLock():
+        if CHAT_LOG.exists():
+            CHAT_LOG.unlink()
     log("info", "chat.cleared", "Ask Somna conversation cleared")
     return "Conversation cleared."
 
@@ -5573,18 +5660,33 @@ def _check_chat_action(a, question, scope):
             return None, "no rule given"
         return {"type": "steer", "text": text, "standing": a.get("standing") is not False}, None
     rel = str(a.get("file") or "")
-    m = re.match(r"^memory/clients/([^/]+)/", rel) or re.match(r"^memory/inbox/([^/]+)/", rel)
-    grp = m.group(1) if m else GENERAL
-    if grp != GENERAL and grp not in scope:
-        return None, "it touches a client this conversation is not about"
+    clients = load_repos()["clients"]
+    if rel != rel.lower():
+        # macOS folders ignore case, so Clients/x would be another client's file under a different name
+        return None, "memory paths are lower case"
+    gm = re.match(r"^memory/((me|work)/[a-z0-9][a-z0-9._-]*\.md|index\.md|scratch/notes\.md)$", rel)
+    cm = re.match(r"^memory/clients/([a-z0-9][a-z0-9_.-]*)/(context\.md|repos/[a-z0-9][a-z0-9._-]*\.md)$", rel) or \
+        re.match(r"^memory/inbox/([a-z0-9][a-z0-9_.-]*)/[a-z0-9_][a-z0-9._-]*\.md$", rel)
+    if gm:
+        grp = GENERAL
+    elif cm and cm.group(1) in clients:
+        grp = cm.group(1)
+        if grp not in scope:
+            return None, "it touches a client this conversation is not about"
+        if len(scope) > 1:
+            return None, "this conversation is about more than one client; ask about one at a time to change a client's memory"
+        if not (HOME / rel).is_file():
+            return None, "only existing client files can be changed here; map the repo to create its context"
+    else:
+        return None, "Ask Somna can only change your notes and the context files of the client you are asking about"
     raw = dict(a, id="c1", confidence="high", summary=a.get("summary") or "change from Ask Somna",
                evidence=[{"source": "owner:chat", "quote": _norm(question)[:300]}], refs=[])
     roots = {r.get("name"): root for root, r in load_repos()["repos"].items() if r.get("client") == grp}
     chk = check_findings([raw], grp, {"wt": HOME, "parsed": {}, "texts": {}, "roots": roots, "owner_text": question})[0]
     if chk.get("rejected"):
         return None, chk["rejected"]
-    if not chk.get("in_scope") and not rel.startswith("memory/"):
-        return None, "not a memory file"
+    if not chk.get("in_scope"):
+        return None, "that file is outside what this conversation may change"
     return {"type": "memory", "file": rel, "where": friendly_file(rel), "action": chk["action"], "section": chk["section"],
             "target_text": chk["target_text"], "new_text": chk["new_text"], "summary": chk["summary"], "checks": chk["checks"]}, None
 
@@ -5612,7 +5714,8 @@ def do_ask(question, focus=None, tab=""):
                          "{{HISTORY}}": "\n".join("owner: {}\nyou: {}".format(h["q"], h.get("answer", "")[:800]) for h in hist[-6:]) or "(new conversation)",
                          "{{QUESTION}}": question, "{{BUNDLE}}": bundle})
     CHAT_DIR.mkdir(parents=True, exist_ok=True)
-    cmd = _engine_cmd(dict(cfg, restrict_tools=True), engine, prompt, "", [], model_key="chat_model", budget_key="chat_max_budget_usd", edits=False)
+    cmd = _engine_cmd(dict(cfg, restrict_tools=True), engine, prompt, "", [], model_key="chat_model", budget_key="chat_max_budget_usd",
+                      edits=False, isolate="repo")
     t0 = time.time()
     try:
         u = _run_engine(cmd, CHAT_DIR, min(cfg["timeout_minutes"], 5) * 60, LOGS / "chat-engine.log", "ask", usage_key="ask")
@@ -5623,7 +5726,10 @@ def do_ask(question, focus=None, tab=""):
     answer = str(o.get("answer") or (u.get("result") if not o else "") or "").strip()[:8000] or "I could not find an answer in your memory."
     actions, refused = [], []
     for i, a in enumerate((o.get("actions") if isinstance(o.get("actions"), list) else [])[:3]):
-        ok, why = _check_chat_action(a, question, scope)
+        try:
+            ok, why = _check_chat_action(a, question, scope)
+        except Exception as ex:
+            ok, why = None, "the suggestion was malformed ({})".format(type(ex).__name__)
         if ok:
             ok.update(id="a{}".format(i + 1), status="proposed")
             actions.append(ok)
@@ -5668,55 +5774,64 @@ def _owner_change(d, origin):
 
 def do_chat_action(entry_id, action_id):
     with _decide_lock:
-        entries = chat_history(500)
-        e = next((x for x in entries if x.get("id") == entry_id), None)
+        e = next((x for x in chat_history(100000) if x.get("id") == entry_id), None)
         a = next((x for x in (e or {}).get("actions") or [] if x.get("id") == action_id), None)
         if not a:
             raise SomnaError("no such suggestion", "not_found")
         if a.get("status") != "proposed":
             raise SomnaError("already done")
-        t = a["type"]
-        if t == "settings":
-            msg = do_save_settings({"settings": a["settings"]})
-        elif t == "run":
-            args = ["create"] + (["--sessions", ",".join(a["sessions"])] if a.get("sessions") else
-                                 ["--since-hours", str(a["since_hours"])] if a.get("since_hours") else ["--since-last"])
-            if a.get("instructions"):
-                args += ["--instructions", a["instructions"]]
+        t_ = a["type"]
+        if t_ == "settings":
+            fresh, why = _check_chat_action(dict(a), e["q"], e.get("scope") or [])
+            if not fresh:
+                raise SomnaError("This change no longer fits: {}".format(why))
+            msg = do_save_settings({"settings": fresh["settings"]})
+        elif t_ == "run":
+            fresh, why = _check_chat_action(dict(a), e["q"], e.get("scope") or [])
+            if not fresh:
+                raise SomnaError("This run no longer fits: {}".format(why))
+            args = ["create"] + (["--sessions=" + ",".join(fresh["sessions"])] if fresh.get("sessions") else
+                                 ["--since-hours={}".format(int(fresh["since_hours"]))] if fresh.get("since_hours") else ["--since-last"])
+            if fresh.get("instructions"):
+                args += ["--instructions=" + fresh["instructions"]]
             msg = _start_background(args, "Cycle")
-        elif t == "steer":
+        elif t_ == "steer":
+            text = _norm(a.get("text"))[:500]
             cur = STEERING.read_text() if STEERING.exists() else "# Steering for the nightly cycle\n"
             if "## From Ask Somna" not in cur:
                 cur = cur.rstrip() + "\n\n## From Ask Somna\n"
-            STEERING.write_text(cur.rstrip() + "\n- " + a["text"] + "\n")
+            STEERING.write_text(cur.rstrip() + "\n- " + text + "\n")
             git("add", "--", str(STEERING.relative_to(HOME)))
-            git("commit", "-m", "steering: {}".format(a["text"][:100]), "--", str(STEERING.relative_to(HOME)))
+            git("commit", "-m", "steering: {}".format(text[:100]), "--", str(STEERING.relative_to(HOME)))
             msg = "Added to your standing rules. Every cycle follows it from now on."
         else:
             fresh, why = _check_chat_action(dict(a, type="memory"), e["q"], e.get("scope") or [])
             if not fresh:
                 raise SomnaError("This change no longer fits memory: {}".format(why))
-            d = dict(a, plain=a.get("summary"))
+            d = dict(fresh, plain=fresh.get("summary"))
             msg = _owner_change(d, "ask")
             if not msg:
-                rel = _held_target(GENERAL, a["file"])
-                what = {"add": "add «{}»{}".format(a["new_text"], " under " + a["section"] if a.get("section") else ""),
-                        "replace": "replace «{}» with «{}»".format(a["target_text"], a["new_text"]),
-                        "remove": "remove «{}»".format(a["target_text"])}[a["action"]].replace("\n", " ")
+                rel = _held_target(GENERAL, fresh["file"])
+                what = {"add": "add \u00ab{}\u00bb{}".format(fresh["new_text"], " under " + fresh["section"] if fresh.get("section") else ""),
+                        "replace": "replace \u00ab{}\u00bb with \u00ab{}\u00bb".format(fresh["target_text"], fresh["new_text"]),
+                        "remove": "remove \u00ab{}\u00bb".format(fresh["target_text"])}[fresh["action"]].replace("\n", " ")
                 f = HOME / rel
                 f.parent.mkdir(parents=True, exist_ok=True)
                 if not f.exists():
                     f.write_text("# Notes for the next cycle\nOne dated line per fact.\n")
                 with open(str(f), "a") as fh:
-                    fh.write("- {}: [owner accepted, from Ask Somna] {} (for {})\n".format(dt.date.today(), what[:900], a["file"]))
+                    fh.write("- {}: [owner accepted, from Ask Somna] {} (for {})\n".format(dt.date.today(), what[:900], fresh["file"]))
                 msg = "Memory is busy right now, so it was added to {}; the next cycle files it.".format(friendly_file(rel))
-        a["status"], a["done_at"], a["result"] = "done", iso(utcnow()), msg
-        _chat_rewrite(entries)
-        log("info", "chat.action", "Ask Somna suggestion carried out", type=t, entry=entry_id)
+
+        def mark(ent):
+            for x in ent.get("actions") or []:
+                if x.get("id") == action_id:
+                    x.update(status="done", done_at=iso(utcnow()), result=msg)
+        _chat_update(entry_id, mark)
+        log("info", "chat.action", "Ask Somna suggestion carried out", type=t_, entry=entry_id)
         return msg
 
 
-# ---------------- UI server ----------------
 def _memory_files():
     files = []
     for p in sorted(MEM.rglob("*")):
@@ -5897,7 +6012,7 @@ def make_server(port, token):
         def log_message(self, *a):
             pass
 
-        def _send(self, code, body, ctype="application/json"):
+        def _send(self, code, body, ctype="application/json", nonce=None):
             data = body if isinstance(body, bytes) else (json.dumps(body) if ctype == "application/json" else body).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", ctype + "; charset=utf-8")
@@ -5907,7 +6022,8 @@ def make_server(port, token):
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("Referrer-Policy", "no-referrer")
             if ctype == "text/html":
-                self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; "
+                self.send_header("Content-Security-Policy", "default-src 'none'; script-src {}; ".format(
+                                 "'nonce-{}'".format(nonce) if nonce else "'none'") +
                                  "style-src 'unsafe-inline'; connect-src 'self'; img-src data:; base-uri 'none'; "
                                  "form-action 'none'; frame-ancestors 'none'")
             self.end_headers()
@@ -5935,8 +6051,9 @@ def make_server(port, token):
             try:
                 if u.path == "/":
                     page = UI_FILE.read_text() if UI_FILE.exists() else "<h1>ui/index.html missing. Re-run install.sh</h1>"
-                    page = page.replace("__CYCLE_TOKEN__", token).replace("__SOMNA_VERSION__", VERSION)
-                    return self._send(200, page, "text/html")
+                    nonce = secrets.token_urlsafe(18)
+                    page = page.replace("__CYCLE_TOKEN__", token).replace("__SOMNA_VERSION__", VERSION).replace("<script>", '<script nonce="{}">'.format(nonce), 1)
+                    return self._send(200, page, "text/html", nonce=nonce)
                 if u.path == "/api/summary":
                     expire_questions()
                     return self._send(200, summary())
@@ -6006,6 +6123,12 @@ def make_server(port, token):
             except ValueError as e:
                 return self._send(400, {"error": "bad json: {}".format(e)})
             path = urlparse(self.path).path
+            if path == "/api/ask":
+                # a question can take a while; it only reads, so it must not hold up cancel, adopt or settings
+                try:
+                    return self._send(200, {"ok": True, "entry": do_ask(body.get("question"), body.get("focus"), body.get("tab"))})
+                except SomnaError as e:
+                    return self._err(e, path)
             try:
                 with action_lock:
                     if path == "/api/adopt":
@@ -6020,16 +6143,14 @@ def make_server(port, token):
                         ids = body.get("session_ids")
                         ids = [str(x) for x in ids] if isinstance(ids, list) and ids else None
                         validate_inputs(instr, model, ids)
-                        args = ["create"] + (["--sessions", ",".join(ids)] if ids else ["--since-last"])
+                        args = ["create"] + (["--sessions=" + ",".join(ids)] if ids else ["--since-last"])
                         if instr:
-                            args += ["--instructions", instr]
+                            args += ["--instructions=" + instr]
                         if model:
-                            args += ["--model", model]
+                            args += ["--model=" + model]
                         msg = _start_background(args, "Cycle")
                     elif path == "/api/settings":
                         msg = do_save_settings(body)
-                    elif path == "/api/ask":
-                        return self._send(200, {"ok": True, "entry": do_ask(body.get("question"), body.get("focus"), body.get("tab"))})
                     elif path == "/api/chat_action":
                         msg = do_chat_action(body.get("entry"), body.get("action"))
                     elif path == "/api/chat_clear":
@@ -6080,7 +6201,7 @@ def make_server(port, token):
                         if r.get("status") != "confirmed":
                             raise SomnaError("confirm the client first")
                         cls = [c for c in body.get("classes") or [] if c in AUDIT_CLASSES]
-                        msg = _start_background(["audit", body["path"]] + (["--classes", ",".join(cls)] if cls else []), "Security audit of {}".format(r["name"]))
+                        msg = _start_background(["audit", "--", body["path"]] if not cls else ["audit", "--classes=" + ",".join(cls), "--", body["path"]], "Security audit of {}".format(r["name"]))
                     elif path == "/api/audit_save":
                         fps = body.get("fingerprints")
                         msg = do_audit_save(body.get("id"), [str(x) for x in fps] if isinstance(fps, list) and fps else None)

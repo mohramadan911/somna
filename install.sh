@@ -59,7 +59,7 @@ if [ -d "$MEMORY_HOME/.git" ]; then
   grep -qx "logs/" "$MEMORY_HOME/.gitignore" 2>/dev/null || printf "logs/\n" >> "$MEMORY_HOME/.gitignore"
   grep -qx "chat/" "$MEMORY_HOME/.gitignore" 2>/dev/null || printf "chat/\n" >> "$MEMORY_HOME/.gitignore"
   for sk in "$KIT_DIR"/template/skills/security-audit; do
-    [ -d "$MEMORY_HOME/skills/$(basename "$sk")" ] || { mkdir -p "$MEMORY_HOME/skills"; cp -R "$sk" "$MEMORY_HOME/skills/"; }
+    mkdir -p "$MEMORY_HOME/skills"; rm -rf "$MEMORY_HOME/skills/$(basename "$sk")"; cp -R "$sk" "$MEMORY_HOME/skills/"   # Somna's own skill: always the current version
   done
   ( cd "$MEMORY_HOME"; T="bin ui engine/prompt.md engine/map-prompt.md engine/hunt-prompt.md engine/validate-prompt.md engine/verify-prompt.md engine/ask-prompt.md engine/audit-prompt.md engine/repos.json memory/inbox/README.md memory/clients/README.md skills/security-audit .gitignore"
     if [ -n "$(git status --porcelain -- $T)" ]; then git add -- $T && git commit -qm "tooling: update from somna installer"; fi )

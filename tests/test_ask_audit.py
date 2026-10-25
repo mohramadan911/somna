@@ -133,6 +133,26 @@ s, j = J("/api/chat_action", {"entry": e["id"], "action": a["id"]}) if a else (0
 check("A13 while memory is busy the change is queued for the next cycle, not forced in", s == 200 and "busy" in j.get("message", "")
       and "Releases are tagged on Fridays" in open(M + "/memory/inbox/acme/shop.md").read() and "Releases are tagged" not in open(CTX).read(), j)
 
+# ---------- review fixes ----------
+s, e, mat = ask("Put something in the readme about shop")
+check("R1 a memory change outside the allowed files is refused", not [x for x in e["actions"] if x["type"] == "memory"] and e.get("refused"), e)
+s, e, mat = ask("Use the uppercase path for shop")
+check("R2 an upper-case path cannot reach a client's file", not [x for x in e["actions"] if x["type"] == "memory"] and any("lower case" in x for x in e.get("refused", [])), e)
+s, e, mat = ask("Write this for both clients: acme and globex")
+check("R3 a change while two clients are in scope is refused", not [x for x in e["actions"] if x["type"] == "memory"] and any("more than one client" in x for x in e.get("refused", [])), e)
+s, e, mat = ask("Set a bad model type")
+check("R4 a malformed setting is left out, the answer still comes", s == 200 and any("model name" in x for x in e.get("refused", [])), e)
+s, e, mat = ask("Run with an option injection")
+a = next((x for x in e["actions"] if x["type"] == "run"), None)
+s, j = J("/api/chat_action", {"entry": e["id"], "action": a["id"]})
+wait_idle()
+check("R5 instructions that look like an option are passed as text", last("cycle").get("instructions") == "--model=opus", last("cycle").get("instructions"))
+calls = [json.loads(l) for l in open(H + "/mock-calls.log")]
+check("R6 Ask runs with no MCP servers and no project settings", all(c["strict_mcp"] for c in calls if c["kind"] == "ask"))
+check("R7 the page uses a script nonce, so injected markup cannot run script", "nonce-" in urllib.request.urlopen(BASE + "/").headers.get("Content-Security-Policy", ""))
+s, e, mat = ask("Show me the xss run")
+XSS_ENTRY = e["id"]
+
 # ---------- security audit ----------
 J("/api/discard", {"id": last("map")["id"]})
 r = S("audit", WEB)
@@ -142,14 +162,19 @@ check("S1 audit completed with every stage", A["status"] == "completed" and all(
 check("S1 recon picked the attack classes", [c["id"] for c in A["attack_classes"]] == ["http-auth", "supply-chain"], A.get("attack_classes"))
 F = {f["title"]: f for f in A["audit_findings"]}
 check("S1 real findings are confirmed", F["App prints without auth check"]["status"] == "confirmed" and F["Provider not pinned"]["status"] == "confirmed", {k: v["status"] for k, v in F.items()})
-check("S1 the same place found twice is merged", F["Same app issue seen twice"]["status"] == "rejected" and "Same problem" in F["Same app issue seen twice"]["rejected"])
+check("S1 the same bug found twice is merged", F["App prints without an auth check"]["status"] == "rejected" and "Same problem" in F["App prints without an auth check"]["rejected"])
+check("S1 a different bug at the same place is kept", F["CSRF on the same entry point"]["status"] == "confirmed", F["CSRF on the same entry point"])
+check("S1 finding ids are unique, set by code", len({f["id"] for f in A["audit_findings"]}) == len(A["audit_findings"]))
 check("S1 a finding in a file that does not exist is rejected by code", "does not exist" in F["Made up file"].get("rejected", ""))
 check("S1 report and findings.json written", os.path.exists(M + "/cycles/" + A["id"] + "/report.md") and
-      len(json.load(open(M + "/cycles/" + A["id"] + "/findings.json"))["confirmed"]) == 2)
+      len(json.load(open(M + "/cycles/" + A["id"] + "/findings.json"))["confirmed"]) == 3)
 check("S1 the repo was not touched", not A.get("warning") and subprocess.run(["git", "-C", WEB, "status", "--porcelain"], capture_output=True, text=True).stdout == "")
 calls = [json.loads(l) for l in open(H + "/mock-calls.log")]
 au = [c for c in calls if c["kind"].startswith("audit")]
 check("S1 every audit run only reads", au and all(c["tools"] == "Read,Glob,Grep" and c["perm"] == "default" for c in au), [(c["kind"], c["tools"]) for c in au])
+check("S1 audit runs ignore the repo's own Claude settings, hooks and MCP servers", all(c["strict_mcp"] and c["setting_sources"] == "user" for c in au))
+mp = [c for c in calls if c["kind"] == "map"]
+check("S1 maps run isolated from the repo's settings too", mp and all(c["strict_mcp"] and c["setting_sources"] == "user" for c in mp))
 ver = [c for c in au if c["kind"] == "audit verify"][-1]
 check("S1 the fresh check opens only its own folder", len(ver["dirs"]) == 1 and ver["dirs"][0].endswith("/audit/verify"), ver["dirs"])
 check("S1 nothing saved to memory yet", "## Security findings" not in open(CTX).read())
@@ -165,6 +190,9 @@ check("S3 a finding the disprove step breaks with real code is rejected", F["Pro
 r = S("audit", WEB, env={"MOCK_AUDIT_UNSURE": "1"})
 F = {f["title"]: f for f in last("audit")["audit_findings"]}
 check("S4 an unsure fresh check means needs validation", F["App prints without auth check"]["status"] == "needs_validation")
+r = S("audit", WEB, env={"MOCK_AUDIT_CUSTOM": "1"})
+AC = last("audit")
+check("R8 a custom attack class title loses its markup", all("<" not in c["title"] for c in AC["attack_classes"]) and any(c["id"] == "custom-webhooks" for c in AC["attack_classes"]), AC["attack_classes"])
 r = S("audit", WEB, "--classes", "cloud")
 A2 = last("audit")
 check("S5 --classes skips recon's choice", [c["id"] for c in A2["attack_classes"]] == ["cloud"], A2.get("attack_classes"))
@@ -178,7 +206,7 @@ for c in J("/api/state")[1]["cycles"]:
 s, j = J("/api/audit_save", {"id": A["id"]})
 txt = open(CTX).read()
 check("S7 saving puts confirmed findings in the repo context", s == 200 and "## Security findings" in txt and "[high] App prints without auth check: envs/web/app.py:1" in txt, j)
-check("S7 only confirmed ones by default", "Made up file" not in txt and "Same app issue" not in txt)
+check("S7 only confirmed ones by default", "Made up file" not in txt and "App prints without an auth check" not in txt)
 s, j = J("/api/audit_save", {"id": A["id"]})
 check("S7 saving twice does nothing", s != 200 and "nothing to save" in j.get("error", ""), j)
 hook = subprocess.run([PY, M + "/bin/somna", "hook", "session-start"], input=json.dumps({"cwd": WEB, "session_id": "x"}), capture_output=True, text=True).stdout
@@ -192,7 +220,8 @@ async def ui():
         b = await p.chromium.launch(); pg = await b.new_page(viewport={"width": 1360, "height": 900})
         errs = []; pg.on("pageerror", lambda e: errs.append(str(e)))
         await pg.goto(BASE + "/"); await pg.wait_for_timeout(1200)
-        await pg.click("#askBtn"); await pg.wait_for_timeout(600)
+        await pg.click("#askBtn"); await pg.wait_for_timeout(800)
+        check("UI injected markup in a suggestion does not run", await pg.evaluate("window.__pwned === undefined") and '<img src=x' in await pg.inner_text("#askLog"))
         check("UI Ask opens with the history", await pg.is_visible("#ask") and "Make nights cheaper" in await pg.inner_text("#askLog"))
         await pg.fill("#askQ", "Make nights cheaper please"); await pg.click("#askSend")
         for _ in range(40):
@@ -205,6 +234,8 @@ async def ui():
         await pg.screenshot(path=SHOTS + "/ask-panel.png")
         await pg.click("#askClose")
         await pg.click('nav button[data-tab="review"]'); await pg.wait_for_timeout(700)
+        await pg.select_option("#cycleSel", AC["id"]); await pg.wait_for_timeout(900)
+        check("UI a hostile attack class title does not run", await pg.evaluate("window.__pwn2 === undefined"))
         await pg.select_option("#cycleSel", A["id"]); await pg.wait_for_timeout(900)
         t = await pg.inner_text("#main")
         check("UI audit view: findings by status with severity and place", "Security audit of shop" in t and "Confirmed" in t and "envs/web/app.py:1" in t and "Checked and rejected" in t, t[:600])

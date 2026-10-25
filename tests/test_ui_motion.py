@@ -101,6 +101,10 @@ async def main():
         pcts, titles = await follow_job(pg, "cycle")
         check("cycle: no page re-render while running", mut_mid == 0, mut_mid)
         check("cycle: dock names the client being curated", any("Running" in t for t in titles), titles)
+        for _ in range(15):
+            if await pg.inner_text("#runBtn") == "Run cycle now":
+                break
+            await pg.wait_for_timeout(200)
         check("cycle: run button disabled while running then back", await pg.inner_text("#runBtn") == "Run cycle now")
 
         # ---- quiet poll does not repaint when nothing changed

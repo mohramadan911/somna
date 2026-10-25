@@ -1266,7 +1266,7 @@ function actHtml(e, a) {
   else if (a.type === "memory") h += '<div class="t">' + esc({ add: "Add to ", replace: "Change in ", remove: "Remove from " }[a.action] + a.where) + '</div><div class="sub" style="font-size:13px">' + esc(a.summary) + "</div>" +
     '<div class="dc" style="padding:0;background:none"><div class="chg">' + (a.target_text ? a.target_text.split("\n").filter(Boolean).map((l) => '<div class="d">' + esc(l) + "</div>").join("") : "") +
     (a.action !== "remove" && a.new_text ? a.new_text.split("\n").filter(Boolean).map((l) => '<div class="a">' + esc(l) + "</div>").join("") : "") + "</div></div>";
-  else if (a.type === "run") h += '<div class="t">Run a cycle now</div><div class="sub" style="font-size:13px">' + esc(a.sessions ? a.sessions.length + " chosen sessions" : a.since_hours ? "sessions from the last " + a.since_hours + " hours" : "sessions since the last cycle") + (a.instructions ? " · instructions: " + a.instructions : "") + "</div>";
+  else if (a.type === "run") h += '<div class="t">Run a cycle now</div><div class="sub" style="font-size:13px">' + esc(a.sessions ? a.sessions.length + " chosen sessions" : a.since_hours ? "sessions from the last " + a.since_hours + " hours" : "sessions since the last cycle") + (a.instructions ? " · instructions: " + esc(a.instructions) : "") + "</div>";
   else if (a.type === "steer") h += '<div class="t">Add a standing rule for every cycle</div><div class="sub" style="font-size:13px">' + esc(a.text) + "</div>";
   if (a.status === "done") h += '<div class="done">✓ ' + esc(a.result || "Done") + "</div>";
   else h += '<button class="btn primary" type="button" data-askact="' + esc(a.id) + '" data-askentry="' + esc(e.id) + '">' + ({ settings: "Save settings", memory: "Save to memory", run: "Start run", steer: "Add rule" }[a.type]) + "</button>";
@@ -1306,6 +1306,7 @@ async function sendAsk() {
   try {
     const j = await api("/api/ask", { question: q, focus: S.ask.focus, tab: S.tab });
     S.ask.entries = S.ask.entries.filter((x) => x.id !== "pending").concat([j.entry]);
+    S.ask.focus = null;   // a focus is for one question; the next one starts from what you type
   } catch (err) {
     S.ask.entries = S.ask.entries.filter((x) => x.id !== "pending"); $("#askQ").value = q; toast(err.message, true);
   }
@@ -1338,8 +1339,8 @@ function auditView(D, keep, opts) {
   if (r.status === "failed") h += '<div class="banner bad"><strong>The audit failed.</strong> ' + esc(s.error || "") + (D.engine_log ? '<pre class="file" style="margin-top:10px;max-height:260px;overflow:auto">' + esc(D.engine_log) + "</pre>" : "") + "</div>";
   if (r.warning) h += '<div class="banner bad">' + esc(r.warning) + "</div>";
   if (r.stages && r.stages.length) h += '<div class="pipe">' + [
-    st.recon && "<span>Mapped the attack surface: " + ((r.attack_classes || []).map((c) => c.title).join(", ") || "default classes") + "</span>",
-    st.hunt && "<span>Hunted: " + (st.hunt.findings || 0) + " found" + ((st.hunt.failed || []).length ? ", " + st.hunt.failed.length + " search failed" : "") + "</span>",
+    st.recon && "<span>Mapped the attack surface: " + (esc((r.attack_classes || []).map((c) => c.title).join(", ")) || "default classes") + "</span>",
+    st.hunt && "<span>Hunted: " + (+st.hunt.findings || 0) + " found" + ((st.hunt.failed || []).length ? ", " + st.hunt.failed.length + " search failed" : "") + "</span>",
     st.check && "<span>Checked paths, lines and quotes: " + st.check.passed + " passed</span>",
     st.validate && "<span>Tried to disprove: " + (st.validate.upheld || 0) + " held up</span>",
     st.verify && "<span>Fresh check: " + (st.verify.confirmed || 0) + " confirmed</span>"].filter(Boolean).join("<i>→</i>") + "</div>";
@@ -1364,7 +1365,12 @@ function auditView(D, keep, opts) {
   if (D.run_log) h += '<details class="glass card"><summary><strong>Run log</strong></summary><pre class="file" style="margin-top:10px;max-height:380px;overflow:auto">' + esc(D.run_log) + "</pre></details>";
   paint(h, keep);
   if ($("#cycleSel")) $("#cycleSel").onchange = async (e) => { S.cycleId = e.target.value; await loadDetail(); render(false); };
-  const save = (fps, btn) => busy(btn, async () => { try { const j = await api("/api/audit_save", { id: r.id, fingerprints: fps }); toast(j.message); await loadDetail(); render(true); } catch (err) { toast(err.message, true); } });
+  const save = (fps, btn) => {
+    const lines = F.filter((f) => !f.saved_at && f.status !== "rejected" && (fps ? fps.indexOf(f.fingerprint) >= 0 : f.status === "confirmed")).map((f) => f.memory_line || f.title);
+    if (!confirm("Add these lines to the " + ((r.repo || {}).name || "repo") + " context, under Security findings? Every later session in that repo will see them.\n\n" + lines.join("\n"))) return;
+    doSave(fps, btn);
+  };
+  const doSave = (fps, btn) => busy(btn, async () => { try { const j = await api("/api/audit_save", { id: r.id, fingerprints: fps }); toast(j.message); await loadDetail(); render(true); } catch (err) { toast(err.message, true); } });
   if ($("#aSaveAll")) $("#aSaveAll").onclick = (e) => save(null, e.currentTarget);
   document.querySelectorAll("[data-afp]").forEach((b) => b.onclick = (e) => save([b.dataset.afp], e.currentTarget));
 }
